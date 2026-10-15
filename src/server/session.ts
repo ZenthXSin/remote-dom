@@ -1,3 +1,4 @@
+import {Diagnostics,diagnosticTarget} from './diagnostics.js';
 import {randomUUID,createHash} from 'node:crypto';
 import {readFile,stat} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -19,6 +20,7 @@ import {AssetTransit} from './asset-transit.js';
 import {ASSET_MIMES,MAX_ASSET_BYTES,fetchAsset,type AssetBody,type AssetSource} from './asset-source.js';
 
 export class RemoteSession {
+  readonly diagnostics=new Diagnostics();
   readonly id=randomUUID(); readonly created=Date.now(); lastActivity=Date.now();
   browser!:Browser; context!:BrowserContext; page!:Page; cdp!:CDPSession;
   private renderFlow=new WeakMap<WebSocket,{enabled:boolean;waiting?:{epoch:string;seq:number}}>();
@@ -98,6 +100,13 @@ export class RemoteSession {
     const capture=new FrameCapture(page,cdp,this.captureSource,this.svgSources);
     this.windows.set(id,{page,cdp,capture,title:''});
     this.watchDialogs(page);
+    const requestIds=new WeakMap<object,{id:number;at:number}>();let requestCounter=0;
+    page.on('request',request=>{if(!this.diagnostics.active)return;const info={id:++requestCounter,at:performance.now()};requestIds.set(request,info);this.diagnostics.add('request',{window:id,request:info.id,method:request.method(),resource:request.resourceType(),...diagnosticTarget(request.url()),redirect:!!request.redirectedFrom()});});
+    page.on('response',response=>{if(!this.diagnostics.active)return;const info=requestIds.get(response.request());const headers=response.headers();this.diagnostics.add('response',{window:id,request:info?.id,status:response.status(),ms:info?Math.round(performance.now()-info.at):undefined,...diagnosticTarget(response.url()),challenge:headers['cf-mitigated']==='challenge',ray:/^[a-zA-Z0-9-]{1,80}$/.test(headers['cf-ray']??'')?headers['cf-ray']:undefined});});
+    page.on('requestfailed',request=>{const info=requestIds.get(request);const failure=request.failure()?.errorText??'';this.diagnostics.add('request-failed',{window:id,request:info?.id,...diagnosticTarget(request.url()),reason:failure.match(/net::ERR_[A-Z_]+/)?.[0]??'failed'});});
+    page.on('framenavigated',frame=>this.diagnostics.add('navigation',{window:id,main:frame===page.mainFrame(),...diagnosticTarget(frame.url())}));
+    page.on('pageerror',()=>this.diagnostics.add('page-script-error',{window:id}));
+    page.on('crash',()=>this.diagnostics.add('page-crash',{window:id}));
     page.on('filechooser',chooser=>{void(async()=>{this.uploads.clear();this.picker={id:randomUUID(),chooser,accept:(await chooser.element().getAttribute('accept'))?.slice(0,1024)??'',multiple:chooser.isMultiple()};})().catch(()=>{});});
     page.on('download',download=>{void(async()=>{
       if(this.downloading>=2||this.downloadBytes>=32*1024*1024){await download.cancel();return;}
@@ -146,7 +155,7 @@ export class RemoteSession {
       const assetState=`${this.assetRevision}:${this.fontRules.size}:${this.svgSources.size}:${this.persistenceError}`;
       if(!force&&this.current&&assetState===this.capturedAssetState&&!await this.capture.needsCapture())return;
       const epoch=this.epoch,revision=this.inputRevision;
-      const raw=await this.capture.capture();if(epoch!==this.epoch)return;
+      const captureStart=performance.now();const raw=await this.capture.capture();this.diagnostics.add('capture',{ms:Math.round(performance.now()-captureStart)});if(epoch!==this.epoch)return;
       if(Buffer.byteLength(JSON.stringify(raw))>4*1024*1024)throw new Error('页面超过当前快照大小限制');
       const document=sanitizeDocument(raw,url=>this.resource(url));
       this.capturedAssetState=assetState;
@@ -169,6 +178,7 @@ export class RemoteSession {
     }
   }
   attach(socket:WebSocket) {
+    this.diagnostics.add('stream-open');socket.once('close',(code)=>this.diagnostics.add('stream-close',{code}));
     monitorSocket(socket);this.renderFlow.set(socket,{enabled:false});
     this.view();
     this.lastActivity=Date.now();this.sockets.add(socket);const peer=randomUUID();this.events.set(peer,0);
@@ -355,5 +365,5 @@ export class RemoteSession {
     if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
   summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,persistenceError:this.persistenceError||undefined};}
-  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
+  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;this.diagnostics.clear();clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
 }
