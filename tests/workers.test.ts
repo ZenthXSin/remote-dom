@@ -30,3 +30,11 @@ test('personal proxy edits replace relays, retain the account volume and stop on
  await pool.configureOwnEgress(a.id,{server:'http://93.184.216.34:8081'});await pool.ensure(a);const latest=docker.creates.at(-1);assert.equal(latest.HostConfig.Mounts[0].Source,original.HostConfig.Mounts[0].Source);assert.equal(latest.Env.some((value:string)=>value.includes('personal-secret')),false);assert.equal(docker.volumes.size,2);assert.equal(docker.containers.get('rd-private-'+b.id).State.Running,true);
  await pool.switchEgress(a.id,'default');await pool.ensure(a);assert.equal(docker.containers.has('rd-private-'+a.id+'-egress'),false);await pool.close();
 });
+
+test('recreated controller rejoins an already running browser network before health check',async()=>{
+ const docker=new FakeDocker(),a=account(),network='rd-rejoin-'+a.id+'-net';
+ const opts={prefix:'rd-rejoin',image:'engine:test',controller:'control',proxy:'proxy',seccomp:await readFile('deploy/chromium-seccomp.json','utf8'),maxRunning:1,idleMs:60000,health:async()=>{assert.ok(docker.containers.get('control')?.NetworkSettings.Networks[network],'controller must share the private network before probing');}};
+ const original=new DockerWorkers(docker,opts);await original.ensure(a);docker.containers.get('control').NetworkSettings.Networks={};
+ const recreated=new DockerWorkers(docker,opts);await recreated.ensure(a);assert.equal(docker.creates.length,1);assert.equal(docker.stops.length,0);assert.ok(docker.containers.get('control').NetworkSettings.Networks[network]);
+ await original.close();await recreated.close();
+});
