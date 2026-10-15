@@ -25,4 +25,3 @@ function before(previous:Snapshot,next:CapturedDocument):Patch|null {
   if(!upsert.length&&!remove.length&&!metadataChanged)return null;
   return {type:'patch',protocol:1,epoch:previous.epoch,base:previous.seq,seq:previous.seq+1,upsert,remove,...state};
 }
-
