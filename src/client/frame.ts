@@ -86,9 +86,14 @@ function syncFonts(fonts:NonNullable<Snapshot['fontFaces']>){
     try{const face=new FontFace(font.family,`url("${url}")`,{style:font.style,weight:font.weight,unicodeRange:font.unicodeRange??'U+0-10FFFF',display:'swap'});fontFaces.set(key,face);document.fonts.add(face);void face.load().catch(()=>{});}catch{}
   }
 }
+function releaseUnusedAssets(){
+  const fonts=new Set(currentFonts.map(font=>font.assetUrl.slice('asset:'.length))),released:string[]=[];
+  for(const [id,url]of assets)if(!assetNodes.has(id)&&!fonts.has(id)){URL.revokeObjectURL(url);assets.delete(id);pendingAssets.delete(id);released.push(id);}
+  if(released.length)port.postMessage({type:'release-assets',ids:released});
+}
 function paintAssets(){
   assetPaint=undefined;const affected=new Set<string>();for(const id of pendingAssets)for(const node of assetNodes.get(id)??[])affected.add(node);pendingAssets.clear();
-  syncFonts(currentFonts);const changed=[...affected].flatMap(id=>{const record=records.get(id);return record?[record]:[];});if(changed.length&&currentRoot)applyRecords(changed,[],currentRoot);
+  syncFonts(currentFonts);const changed=[...affected].flatMap(id=>{const record=records.get(id);return record?[record]:[];});if(changed.length&&currentRoot)applyRecords(changed,[],currentRoot);releaseUnusedAssets();
 }
 function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
   applying=true;
@@ -164,7 +169,7 @@ function update(message:Snapshot|Patch){
     epoch=message.epoch;seq=message.seq;applyRecords(message.nodes,remove,message.root);
   }
   else {if(message.epoch!==epoch||message.base!==seq){port.postMessage({type:'resync'});return;}inputRevision=message.inputRevision??-1;const released=retireInputs();seq=message.seq;const changed=new Map(message.upsert.map(n=>[n.id,n]));for(const id of released){const add=(id:string)=>{const record=changed.get(id)??records.get(id);if(record){changed.set(id,record);for(const child of record.children??[])add(child);}};add(id);}applyRecords([...changed.values()],message.remove,message.root);}
-  syncFonts(message.fontFaces??[]);
+  syncFonts(message.fontFaces??[]);releaseUnusedAssets();
   if(document.hasFocus()&&!dirty.size&&message.focused){const node=nodes.get(message.focused);if(node instanceof HTMLElement&&document.activeElement!==node)node.focus({preventScroll:true});}
   if(document.hasFocus()&&message.focused&&!dirty.has(message.focused)&&!composing){const record=records.get(message.focused),node=nodes.get(message.focused);if(record?.selectionStart!==undefined&&record.selectionEnd!==undefined){try{if(node instanceof HTMLInputElement||node instanceof HTMLTextAreaElement)node.setSelectionRange(record.selectionStart,record.selectionEnd);else if(node instanceof HTMLElement&&node.isContentEditable){const walk=document.createTreeWalker(node,NodeFilter.SHOW_TEXT);const text:Node[]=[];while(walk.nextNode())text.push(walk.currentNode);const position=(offset:number):[Node,number]=>{for(const item of text){if(offset<=(item.textContent?.length??0))return [item,offset];offset-=item.textContent?.length??0;}return [node,node.childNodes.length];};const range=document.createRange();range.setStart(...position(record.selectionStart));range.setEnd(...position(record.selectionEnd));const selection=getSelection();selection?.removeAllRanges();selection?.addRange(range);}}catch{}}}
   const x=message.scrollX*zoom,y=message.scrollY*zoom;

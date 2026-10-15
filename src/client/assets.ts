@@ -1,12 +1,14 @@
+import {AssetCache,CACHE_CLEAR_KEY} from './asset-cache.js';
 type AssetTask={id:string;state:'queued'|'loading'|'retrying'|'failed';attempts:number;controller?:AbortController;timer?:ReturnType<typeof setTimeout>};
 
 // Resource downloads never hold the document/event queue. A context version
 // prevents an old browser's bytes or completion from affecting its successor.
 export class AssetLoader {
-  private session='';private version=0;private active=0;
+  private session='';private version=0;private active=0;private scope='';private cache=new AssetCache();
   private loaded=new Set<string>();private tasks=new Map<string,AssetTask>();
   private queue:AssetTask[]=[];
-  constructor(private deliver:(id:string,mime:string,bytes:ArrayBuffer)=>void,private status:(pending:number,failed:number)=>void){}
+  constructor(private deliver:(id:string,mime:string,bytes:ArrayBuffer)=>void,private status:(pending:number,failed:number)=>void){window.addEventListener('storage',event=>{if(event.key===CACHE_CLEAR_KEY){this.scope='';this.reset();}});}
+  setScope(scope:string){const next=/^[a-f0-9]{64}$/.test(scope)?scope:'';if(next!==this.scope){this.reset();this.scope=next;}}
   begin(session:string){const same=session===this.session;this.stop();if(!same)this.loaded.clear();this.session=session;this.report();}
   reset(){this.stop();this.session='';this.loaded.clear();this.report();}
   private stop(){this.version++;for(const task of this.tasks.values()){task.controller?.abort();clearTimeout(task.timer);}this.tasks.clear();this.queue=[];this.active=0;}
@@ -15,6 +17,7 @@ export class AssetLoader {
     for(const id of ids){if(!/^[a-f0-9-]{36}$/.test(id)||this.loaded.has(id)||this.tasks.has(id))continue;const task:AssetTask={id,state:'queued',attempts:0};this.tasks.set(id,task);this.queue.push(task);}
     this.report();this.pump();
   }
+  forget(ids:readonly string[]){for(const id of ids)this.loaded.delete(id);}
   retry(){for(const task of this.tasks.values())if(task.state==='failed'){task.state='queued';task.attempts=0;this.queue.push(task);}this.report();this.pump();}
   private report(){let pending=0,failed=0;for(const task of this.tasks.values())if(task.state==='failed')failed++;else pending++;this.status(pending,failed);}
   private pump(){while(this.active<4&&this.queue.length){const task=this.queue.shift()!;this.active++;task.state='loading';void this.load(task,this.session,this.version);}this.report();}
@@ -22,6 +25,10 @@ export class AssetLoader {
     const controller=new AbortController();task.controller=controller;task.attempts++;
     const timeout=setTimeout(()=>controller.abort(),12000);let transient=true;
     try{
+      const cacheKey=this.scope?`${this.scope}:${session}:${task.id}`:'';
+      const cached=cacheKey?await this.cache.get(cacheKey).catch(()=>undefined):undefined;
+      if(version!==this.version)return;
+      if(cached){const bytes=await cached.body.arrayBuffer();if(version!==this.version)return;this.deliver(task.id,cached.mime,bytes);this.loaded.add(task.id);this.tasks.delete(task.id);return;}
       const response=await fetch(`/api/sessions/${session}/assets/${task.id}`,{cache:'no-store',signal:controller.signal});
       transient=response.status>=500||response.status===408||response.status===429;
       if(!response.ok)throw new Error('Resource unavailable');
@@ -31,7 +38,10 @@ export class AssetLoader {
       for(;;){const {done,value}=await reader.read();if(done)break;length+=value.byteLength;if(length>2*1024*1024){transient=false;await reader.cancel();throw new Error('Resource too large');}chunks.push(value);}
       if(version!==this.version)return;
       const bytes=new Uint8Array(length);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
-      this.deliver(task.id,response.headers.get('Content-Type')??'application/octet-stream',bytes.buffer);
+      const mime=response.headers.get('Content-Type')??'application/octet-stream';
+      // Construct the Blob before postMessage transfers/detaches the buffer.
+      if(cacheKey)void this.cache.put(cacheKey,mime,new Blob([bytes],{type:mime})).catch(()=>{});
+      this.deliver(task.id,mime,bytes.buffer);
       this.loaded.add(task.id);this.tasks.delete(task.id);
     }catch{
       if(version!==this.version)return;

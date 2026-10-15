@@ -15,12 +15,14 @@ import {Uploads,type PendingFilePicker} from './uploads.js';
 import type {BrowserStore,LoginState} from './browser-store.js';
 import {proxyHostResolverRules} from './browser-network.js';
 import {monitorSocket} from './socket-health.js';
+import {AssetTransit} from './asset-transit.js';
+import {ASSET_MIMES,MAX_ASSET_BYTES,fetchAsset,type AssetBody,type AssetSource} from './asset-source.js';
 
 export class RemoteSession {
   readonly id=randomUUID(); readonly created=Date.now(); lastActivity=Date.now();
   browser!:Browser; context!:BrowserContext; page!:Page; cdp!:CDPSession;
-  sockets=new Set<WebSocket>(); assets=new Map<string,{body:Buffer;mime:string}>();
-  private assetByUrl=new Map<string,string>(); private assetBytes=0;
+  sockets=new Set<WebSocket>(); assets=new Map<string,AssetSource>();
+  private assetByUrl=new Map<string,string>(); private assetRevision=0;private inlineTransit=new AssetTransit();private inlineIds:string[]=[];private assetLoads=new Map<string,Promise<AssetBody>>();
   private fontRules=new Map<string,RemoteFont[]>();
   private svgSources=new Map<string,string>();private svgBytes=0;
   private windows=new Map<string,{page:Page;cdp:CDPSession;capture:FrameCapture;title:string}>();
@@ -66,13 +68,20 @@ export class RemoteSession {
     });
     this.context.on('response',response=>{void(async()=>{
       const mime=(response.headers()['content-type']??'').split(';')[0];
-      if(!['image/png','image/jpeg','image/gif','image/webp','image/avif','image/svg+xml','audio/wav','audio/x-wav','audio/mpeg','audio/ogg','audio/webm','video/mp4','video/webm','video/ogg','font/woff2','font/woff','application/font-woff','application/font-woff2','font/ttf','font/otf','text/css'].includes(mime))return;
-      const length=Number(response.headers()['content-length']??0);if(length>2*1024*1024||this.assetBytes>16*1024*1024)return;
-      const body=await response.body();if(this.closed||body.length>2*1024*1024||this.assetBytes+body.length>16*1024*1024)return;
+      if(!ASSET_MIMES.has(mime)&&mime!=='image/svg+xml'&&mime!=='text/css')return;
+      const length=Number(response.headers()['content-length']??0);if(length>MAX_ASSET_BYTES)return;
+      if(ASSET_MIMES.has(mime)){
+        if(this.closed||this.assets.size>=2048&&!this.assetByUrl.has(response.url())||response.url().length>8192)return;
+        const headers:Record<string,string>={};const original=await response.request().allHeaders();
+        for(const key of ['accept','authorization','referer','origin','user-agent'])if(original[key])headers[key]=original[key];
+        const previous=this.assetByUrl.get(response.url());if(previous)this.assets.delete(previous);
+        const id=randomUUID();this.assets.set(id,{url:response.url(),mime,method:response.request().method(),headers});this.assetByUrl.set(response.url(),id);this.assetRevision++;return;
+      }
+      // CSS is parsed into font rules; SVG is parsed into sanitized DOM. Neither
+      // is a binary resource served from the user-facing asset endpoint.
+      const body=await response.body();if(this.closed||body.length>MAX_ASSET_BYTES)return;
       if(mime==='image/svg+xml'){if(this.svgSources.size<32&&this.svgBytes+body.length<=4*1024*1024&&!this.svgSources.has(response.url())){this.svgSources.set(response.url(),body.toString());this.svgBytes+=body.length;}return;}
-      if(mime==='text/css'){if(this.fontRules.size<100)this.fontRules.set(response.url(),fontsFromCss(body.toString(),response.url()));return;}
-      if(this.assetByUrl.has(response.url()))return;
-      const id=randomUUID();this.assets.set(id,{body,mime});this.assetByUrl.set(response.url(),id);this.assetBytes+=body.length;
+      if(this.fontRules.size<100)this.fontRules.set(response.url(),fontsFromCss(body.toString(),response.url()));
     })().catch(()=>{});});
     await this.registerWindow(await this.context.newPage());
     this.context.on('page',page=>{this.switching=this.switching.then(()=>this.registerWindow(page)).catch(()=>{void page.close();});});
@@ -133,7 +142,7 @@ export class RemoteSession {
   private async captureDocument(force=false) {
     if(this.closed)return;
     try {
-      const assetState=`${this.assetByUrl.size}:${this.fontRules.size}:${this.svgSources.size}:${this.persistenceError}`;
+      const assetState=`${this.assetRevision}:${this.fontRules.size}:${this.svgSources.size}:${this.persistenceError}`;
       if(!force&&this.current&&assetState===this.capturedAssetState&&!await this.capture.needsCapture())return;
       const epoch=this.epoch,revision=this.inputRevision;
       const raw=await this.capture.capture();if(epoch!==this.epoch)return;
@@ -269,9 +278,32 @@ export class RemoteSession {
     if(url.length>2800000)return;
     const match=url.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/);if(!match)return;
     const key='inline:'+createHash('sha256').update(url).digest('hex');const existing=this.assetByUrl.get(key);if(existing)return existing;
-    const body=Buffer.from(match[2],'base64');if(body.length>2*1024*1024||this.assetBytes+body.length>16*1024*1024)return;
-    const id=randomUUID();this.assets.set(id,{body,mime:match[1]});this.assetByUrl.set(key,id);this.assetBytes+=body.length;return id;
+    const decodedBytes=Math.floor(match[2].length*3/4)-(match[2].endsWith('==')?2:match[2].endsWith('=')?1:0);if(decodedBytes>MAX_ASSET_BYTES)return;
+    while(this.inlineIds.length>=256){const old=this.inlineIds.shift()!,source=this.assets.get(old);if(source)this.assetByUrl.delete(source.url);this.assets.delete(old);this.inlineTransit.take(old);}
+    if(this.assets.size>=2048)return;
+    const id=randomUUID();this.assets.set(id,{url:key,mime:match[1]});this.assetByUrl.set(key,id);this.inlineIds.push(id);this.inlineTransit.put(id,{body:Buffer.from(match[2],'base64'),mime:match[1]});this.assetRevision++;return id;
   }
+  async getAsset(id:string):Promise<AssetBody|undefined>{
+    const source=this.assets.get(id);if(!source||this.closed)return;
+    const existing=this.assetLoads.get(id);if(existing)return existing;
+    if(this.assetLoads.size>=4)throw new Error('Resource transfers busy');
+    const load=(async()=>{
+      if(source.url.startsWith('inline:')){
+        const buffered=this.inlineTransit.take(id);if(buffered)return buffered;
+        for(const window of this.windows.values()){
+          const url=await window.capture.inlineResource(source.url.slice(7));
+          if(url){const body=Buffer.from(url.slice(url.indexOf(',')+1),'base64');if(body.length<=MAX_ASSET_BYTES)return {body,mime:source.mime};}
+        }
+        throw new Error('Inline resource has changed');
+      }
+      if(this.assetByUrl.get(source.url)!==id)throw new Error('Resource has changed');
+      for(const window of this.windows.values()){const body=await window.capture.resource(source.url);if(body)return {body,mime:source.mime};}
+      return fetchAsset(source,this.config,this.policy,async url=>(await this.context.cookies(url)).map(cookie=>cookie.name+'='+cookie.value).join('; '));
+    })();
+    this.assetLoads.set(id,load);
+    try{const result=await load;if(!source.url.startsWith('inline:')&&this.assetByUrl.get(source.url)!==id)throw new Error('Resource has changed');return result;}finally{if(this.assetLoads.get(id)===load)this.assetLoads.delete(id);}
+  }
+
   async upload(request:Record<string,unknown>){
     if(request.action==='dismiss-picker'){
       if(!this.picker||request.pickerId!==this.picker.id||request.epoch!==this.epoch)throw new Error('文件选择请求已失效');
@@ -308,5 +340,5 @@ export class RemoteSession {
   send(socket:WebSocket,message:ServerMessage){if(socket.readyState===WebSocket.OPEN){if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
   summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,persistenceError:this.persistenceError||undefined};}
-  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
+  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
 }

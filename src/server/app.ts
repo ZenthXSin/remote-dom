@@ -1,5 +1,5 @@
 import {createServer,type IncomingMessage,type ServerResponse,type Server} from 'node:http';
-import {randomBytes} from 'node:crypto';
+import {randomBytes,createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {WebSocketServer} from 'ws';
@@ -58,7 +58,7 @@ export async function createApp(config:Config,running?:RunningAppState) {
       if(config.accountOwner){if((req.headers.cookie??'').split(';').map(s=>s.trim()).find(s=>s.startsWith('rd_owner='))?.slice(9)!==config.accountOwner){reply(res,401,{error:'账号环境凭证不匹配'});return;}const expires=Date.now()+30*24*3600000;owners.set(config.accountOwner,expires);await store?.rememberOwner(config.accountOwner,expires);}
       let owner=ownerFor(req);if(!owner){if(owners.size>=100){reply(res,503,{error:'研发访客数量已达上限'});return;}owner=randomBytes(32).toString('hex');owners.set(owner,Date.now()+30*24*3600000);await store?.rememberOwner(owner,Date.now()+30*24*3600000);res.setHeader('Set-Cookie',`rd_owner=${owner}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`);}
       const defaultUrl=config.mode==='development'?(config.defaultUrl??(config.hosts.size===1&&!config.hosts.has('*')?`https://${[...config.hosts][0]}/`:fixture.origin)):fixture.origin;
-      reply(res,200,{mode:config.mode,deviceProfile,containerEnvironment,transport:req.headers['x-engine-http-transport']==='1'?'http':'websocket',fixtureUrl:fixture.origin,defaultUrl,allowedHosts:[...config.hosts],sessions:[...sessions.values()].filter(s=>s.owner===owner).map(s=>s.summary()),savedSessions:store?.list(owner)??[],limits:{maxSessions:2},capabilities:{dom:true,remoteJs:true,localRendering:true,canvas:true,iframes:true,uploads:true,downloads:true,popups:true,contenteditable:true,persistentLogin:!!store,basicMedia:true,productionIsolation:false}});return;
+      reply(res,200,{assetCacheScope:createHash('sha256').update('asset-cache-v1:'+owner).digest('hex'),mode:config.mode,deviceProfile,containerEnvironment,transport:req.headers['x-engine-http-transport']==='1'?'http':'websocket',fixtureUrl:fixture.origin,defaultUrl,allowedHosts:[...config.hosts],sessions:[...sessions.values()].filter(s=>s.owner===owner).map(s=>s.summary()),savedSessions:store?.list(owner)??[],limits:{maxSessions:2},capabilities:{dom:true,remoteJs:true,localRendering:true,canvas:true,iframes:true,uploads:true,downloads:true,popups:true,contenteditable:true,persistentLogin:!!store,basicMedia:true,productionIsolation:false}});return;
     }
     const owner=ownerFor(req);if(!owner){reply(res,401,{error:'请刷新页面重新建立研发会话'});return;}
     if(req.method!=='GET'&&req.headers.origin!==origin){reply(res,403,{error:'请求来源不匹配'});return;}
@@ -123,7 +123,7 @@ export async function createApp(config:Config,running?:RunningAppState) {
       if(match[2]==='navigate'&&req.method==='POST'){const request=await body(req);if(typeof request.url!=='string')throw new Error('缺少目标地址');await session.navigate(request.url);reply(res,200,session.summary());return;}
       if(match[2]==='navigation'&&req.method==='POST'){const request=await body(req);if(!['back','forward','reload'].includes(String(request.action)))throw new Error('无效导航');await session.navigation(request.action as 'back'|'forward'|'reload');reply(res,200,{ok:true});return;}
       if(match[2]==='assets'&&req.method==='GET'){
-        const asset=session.assets.get(match[3]);if(!asset){reply(res,404,{error:'资源不存在'});return;}
+        let asset;try{asset=await session.getAsset(match[3]);}catch{reply(res,503,{error:'资源暂时不可用，请重试'});return;}if(!asset){reply(res,404,{error:'资源不存在'});return;}
         res.setHeader('Content-Type',asset.mime);res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");res.end(asset.body);return;
       }
     }

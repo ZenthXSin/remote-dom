@@ -10,6 +10,7 @@
 - 每账户独立浏览器容器及持久化状态。
 - 用户自定义 HTTP/HTTPS 代理、管理员分配出口、账户私有代理和连通性测试。
 - 页面导航、输入、上传下载、多窗口、查找和会话恢复。
+- 图片、字体和媒体在用户浏览器中持久缓存，服务端按需转发。
 - 移动设备参数模拟、修改远端视口尺寸以适配屏幕、沉浸式全屏和悬浮工具球。
 
 ## 本地演示
@@ -63,6 +64,8 @@ npm test
 `npm run test:e2e` 是完整浏览器测试，需要可运行沙箱 Chromium 的非 root 环境，以及 Chromium、OpenSSL、NSS `certutil` 和相应系统依赖。默认 Chromium 路径为 `/usr/bin/chromium`，可通过 `CHROMIUM_PATH` 修改。部分集成测试需要 Docker。端到端测试中的本地 CA 会在测试结束后清理。
 
 目录：`src/control` 为账户和容器管理，`src/server` 为浏览器引擎，`src/remote` 为远端采集，`src/client` 为本地渲染与交互，`src/gateway` 为网关；`tests` 为单元、浏览器及集成测试。
+
+资源缓存策略见 [客户端资源缓存](docs/client-resource-cache.zh-CN.md)。
 
 内存优化与测量方法见 [性能记录](docs/performance.zh-CN.md)。当前尚未实现单容器始终低于 200 MB。
 

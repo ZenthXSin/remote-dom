@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import type {Page,Frame,CDPSession} from 'playwright-core';
 import type {CapturedDocument,MirrorNode} from '../shared/protocol.js';
 
@@ -26,6 +27,31 @@ export class FrameCapture {
     cdp.on('Page.frameNavigated',({frame})=>{const state=this.frames.get(frame.id);if(state?.cdp===cdp)state.context=undefined;});
     cdp.on('Runtime.executionContextDestroyed',({executionContextId})=>{for(const state of this.frames.values())if(state.cdp===cdp&&state.context===executionContextId)state.context=undefined;});
     cdp.on('Runtime.executionContextsCleared',()=>{for(const state of this.frames.values())if(state.cdp===cdp)state.context=undefined;});
+  }
+  async resource(url:string):Promise<Buffer|undefined>{
+    for(const frame of this.frames.values()){
+      try{
+        const result=await frame.cdp.send('Page.getResourceContent',{frameId:frame.id,url});
+        const size=result.base64Encoded?Math.floor(result.content.length*3/4):Buffer.byteLength(result.content);
+        if(size>2*1024*1024+2)return;
+        const body=Buffer.from(result.content,result.base64Encoded?'base64':'utf8');
+        if(body.length<=2*1024*1024)return body;
+      }catch{}
+    }
+  }
+  async inlineResource(hash:string):Promise<string|undefined>{
+    // Re-read the live DOM/canvas only on a client cache miss. No data URL is
+    // retained in the Node resource registry after its snapshot was sanitized.
+    for(const frame of this.frames.values())if(frame.context){
+      try{
+        const raw=await this.evaluate(frame,'window.__remoteDom.capture()');
+        const find=(value:unknown):string|undefined=>{
+          if(typeof value==='string'&&value.includes('data:')){for(const match of value.matchAll(/data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+/g)){const url=match[0];if(url.length<=2800000&&createHash('sha256').update(url).digest('hex')===hash)return url;}}
+          else if(value&&typeof value==='object')for(const child of Object.values(value)){const url=find(child);if(url)return url;}
+        };
+        for(const node of raw?.nodes??[]){const url=find(node);if(url)return url;}
+      }catch{}
+    }
   }
   private async discover(){
     const selected=new Map<string,{description:FrameDescription;cdp:CDPSession}>();
