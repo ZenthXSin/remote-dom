@@ -1,0 +1,10 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {chromium} from 'playwright-core';import {createApp} from '../../src/server/app.js';import {readConfig} from '../../src/server/config.js';
+test('slow operations show feedback without covering controls and clear it on acknowledgement or failure',{timeout:35000},async t=>{
+ const config=readConfig({...process.env,PORT:'0',ENGINE_MODE:'demo',ENGINE_HOST:'127.0.0.1'});const app=await createApp(config);t.after(()=>app.close());const browser=await chromium.launch({executablePath:config.chromiumPath,headless:true,chromiumSandbox:true});t.after(()=>browser.close());
+ const page=await browser.newPage({viewport:{width:1400,height:1000},extraHTTPHeaders:{'X-Engine-Http-Transport':'1'}});await page.goto(app.origin);await page.getByRole('button',{name:'打开体验页面'}).click();const mirror=page.frameLocator('#mirror');await mirror.getByRole('heading',{name:'这段页面，在你的浏览器渲染。'}).waitFor();
+ let release!:()=>void;const gate=new Promise<void>(resolve=>release=resolve);t.after(()=>release());let fail=false;
+ await page.route('**/events',async route=>{const data=route.request().postDataJSON();if(data.events?.some((event:any)=>event.action==='click')){if(fail){await route.fulfill({status:503,contentType:'application/json',body:'{"error":"Test unavailable"}'});return;}await gate;}await route.continue();});
+ await mirror.getByRole('button',{name:'远端计数 +1'}).click();await page.getByText('正在响应…',{exact:true}).waitFor();assert.equal(await page.locator('#operation-state').evaluate(node=>getComputedStyle(node).pointerEvents),'none');
+ release();await mirror.getByText('1',{exact:true}).waitFor();await page.waitForFunction(()=>document.getElementById('operation-state')!.hidden);
+ fail=true;await mirror.getByRole('button',{name:'远端计数 +1'}).click();await page.getByText('操作确认失败，请核对页面状态',{exact:true}).waitFor();await page.waitForFunction(()=>document.getElementById('operation-state')!.hidden);assert.equal(await mirror.getByText('1',{exact:true}).count(),1);
+});

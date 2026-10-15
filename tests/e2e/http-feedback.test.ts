@@ -1,0 +1,36 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {chromium} from 'playwright-core';
+import {createApp} from '../../src/server/app.js';
+import {readConfig} from '../../src/server/config.js';
+
+test('HTTP feedback arrives without background polling and asynchronous updates resume afterwards',{timeout:40000},async t=>{
+  const config=readConfig({...process.env,PORT:'0',ENGINE_MODE:'demo',ENGINE_HOST:'127.0.0.1'});
+  const app=await createApp(config);t.after(()=>app.close());
+  const browser=await chromium.launch({executablePath:config.chromiumPath,headless:true,chromiumSandbox:true});t.after(()=>browser.close());
+  const page=await browser.newPage({viewport:{width:1440,height:1080},extraHTTPHeaders:{'X-Engine-Http-Transport':'1'}});
+  await page.goto(app.origin);await page.getByRole('button',{name:'打开体验页面'}).click();
+  const mirror=page.frameLocator('#mirror');
+  await mirror.getByRole('heading',{name:'这段页面，在你的浏览器渲染。'}).waitFor();
+  let paused=true,blocked=0;
+  await page.route('**/updates?**',async route=>{if(paused){blocked++;await route.fulfill({status:204});}else await route.continue();});
+  let releaseHover!:()=>void;const hoverGate=new Promise<void>(resolve=>releaseHover=resolve);t.after(()=>releaseHover());
+  await page.route('**/events',async route=>{const data=route.request().postDataJSON();if(data.events?.every((event:any)=>event.action==='hover'))await hoverGate;await route.continue();});
+  await page.waitForTimeout(300);
+  await mirror.getByRole('button',{name:'远端计数 +1'}).click();
+  await mirror.getByText('1',{exact:true}).waitFor({timeout:5000});
+  await page.waitForTimeout(250);
+  await mirror.getByRole('button',{name:'远端计数 +1'}).click();
+  await mirror.getByText('2',{exact:true}).waitFor({timeout:2000});
+  releaseHover();
+  const session=[...app.sessions.values()][0];
+  await session.page.evaluate(()=>document.querySelector('textarea')!.addEventListener('mouseenter',()=>{document.getElementById('echo')!.textContent='Native remote hover';}));
+  await mirror.getByPlaceholder('在这里输入中文').hover();
+  paused=false;await mirror.getByText('Native remote hover',{exact:true}).waitFor();paused=true;
+  await mirror.getByPlaceholder('在这里输入中文').fill('同次请求反馈');
+  await mirror.getByText('远端收到：同次请求反馈',{exact:true}).waitFor({timeout:5000});
+  assert.ok(blocked>0,'background snapshots must be suppressed during immediate feedback checks');
+  paused=false;
+  await mirror.getByRole('button',{name:'生成流式回答'}).click();
+  await mirror.getByText('远端回答：同次请求反馈。这段文字通过 DOM 增量更新传到了本地。',{exact:true}).waitFor();
+});

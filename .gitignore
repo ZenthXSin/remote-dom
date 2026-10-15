@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.runtime/
+artifacts/
+backups/
+.env
+.env.*
+!.env.example
+*.log
+*.tar.gz
+*.pem
+*.key
+deploy/secrets/
+deploy/server.env

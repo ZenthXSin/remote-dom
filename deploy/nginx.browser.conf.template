@@ -1,0 +1,19 @@
+# Replace browser.example.com, CERTIFICATE_FILE and CERTIFICATE_KEY_FILE.
+server {
+    listen 443 ssl;
+    server_name browser.example.com;
+    ssl_certificate CERTIFICATE_FILE;
+    ssl_certificate_key CERTIFICATE_KEY_FILE;
+    client_max_body_size 96k;
+    location / {
+        proxy_pass http://127.0.0.1:4174;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+        proxy_buffering off;
+        access_log off;
+    }
+}

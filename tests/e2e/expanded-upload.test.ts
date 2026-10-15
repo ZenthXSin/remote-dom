@@ -1,0 +1,15 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {chromium} from 'playwright-core';import {createApp} from '../../src/server/app.js';import {readConfig} from '../../src/server/config.js';
+test('expanded desktop and mobile windows can cancel and restart file selection; stale requests cannot dismiss a new picker',{timeout:45000},async t=>{
+ const config=readConfig({...process.env,PORT:'0',ENGINE_MODE:'demo',ENGINE_HOST:'127.0.0.1'});const app=await createApp(config);t.after(()=>app.close());const browser=await chromium.launch({executablePath:config.chromiumPath,headless:true,chromiumSandbox:true});t.after(()=>browser.close());
+ const page=await browser.newPage({viewport:{width:1400,height:1000},extraHTTPHeaders:{'X-Engine-Http-Transport':'1'}});await page.goto(app.origin);await page.getByRole('textbox',{name:'目标网址'}).fill(app.fixtureOrigin+'/browser-shell');await page.getByRole('button',{name:'新建浏览器',exact:true}).click();const mirror=page.frameLocator('#mirror');await mirror.getByRole('heading',{name:'Browser capabilities'}).waitFor();const session=[...app.sessions.values()][0];
+ await page.getByRole('button',{name:'放大窗口',exact:true}).click();
+ for(const size of [{width:1400,height:1000},{width:390,height:844}]){
+  await page.setViewportSize(size);await page.waitForTimeout(350);await mirror.getByRole('button',{name:'Attach files',exact:true}).click();await page.getByRole('button',{name:'选择文件',exact:true}).waitFor();
+  const box=await page.locator('#file-panel').boundingBox();assert.ok(box&&box.x>=0&&box.y>=0&&box.x+box.width<=size.width&&box.y+box.height<=size.height,'file choice remains reachable inside the expanded viewport');const old=session.current!.filePicker!.id;
+  await page.getByRole('button',{name:'取消选择文件',exact:true}).click();await page.locator('#file-panel').waitFor({state:'hidden'});assert.equal(await session.page.locator('#upload').textContent(),'No files');
+  await mirror.getByRole('button',{name:'Attach files',exact:true}).click();await page.getByRole('button',{name:'选择文件',exact:true}).waitFor();const picker=session.current!.filePicker!;assert.notEqual(picker.id,old);
+  const status=await page.evaluate(async({id,epoch,pickerId})=>(await fetch(`/api/sessions/${id}/uploads`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'dismiss-picker',pickerId,epoch})})).status,{id:session.id,epoch:session.current!.epoch,pickerId:old});assert.equal(status,400);assert.equal(session.current!.filePicker!.id,picker.id);
+  await page.locator('#files').setInputFiles({name:'expanded.txt',mimeType:'text/plain',buffer:Buffer.from('Expanded window upload')});await mirror.getByText('expanded.txt / Expanded window upload',{exact:true}).waitFor();await page.locator('#file-panel').waitFor({state:'hidden'});assert.equal(await page.locator('#viewer').evaluate(node=>node.classList.contains('is-expanded')),true);
+  await session.page.evaluate(()=>{(document.querySelector('input[type=file]') as HTMLInputElement).value='';document.getElementById('upload')!.textContent='No files';});await mirror.getByText('No files',{exact:true}).waitFor();
+ }
+});

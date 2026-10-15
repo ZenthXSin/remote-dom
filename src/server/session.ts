@@ -1,0 +1,312 @@
+import {randomUUID,createHash} from 'node:crypto';
+import {readFile,stat} from 'node:fs/promises';
+import {join} from 'node:path';
+import {chromium,devices,type Browser,type BrowserContext,type Page,type CDPSession,type Dialog} from 'playwright-core';
+import {WebSocket} from 'ws';
+import type {Config} from './config.js';
+import {TargetPolicy} from './policy.js';
+import {sanitizeDocument} from './sanitize.js';
+import {snapshot,diff} from './diff.js';
+import type {CapturedDocument,Snapshot,UserEvent,ServerMessage,BrowserDialogMessage} from '../shared/protocol.js';
+import type {DeviceProfile} from './device-profile.js';
+import {FrameCapture,type CaptureFrame} from './frame-capture.js';
+import {fontsFromCss,type RemoteFont} from './fonts.js';
+import {Uploads,type PendingFilePicker} from './uploads.js';
+import type {BrowserStore,LoginState} from './browser-store.js';
+import {proxyHostResolverRules} from './browser-network.js';
+import {monitorSocket} from './socket-health.js';
+
+export class RemoteSession {
+  readonly id=randomUUID(); readonly created=Date.now(); lastActivity=Date.now();
+  browser!:Browser; context!:BrowserContext; page!:Page; cdp!:CDPSession;
+  sockets=new Set<WebSocket>(); assets=new Map<string,{body:Buffer;mime:string}>();
+  private assetByUrl=new Map<string,string>(); private assetBytes=0;
+  private fontRules=new Map<string,RemoteFont[]>();
+  private svgSources=new Map<string,string>();private svgBytes=0;
+  private windows=new Map<string,{page:Page;cdp:CDPSession;capture:FrameCapture;title:string}>();
+  private activeWindow='';private viewport={width:1100,height:760};private switching=Promise.resolve();
+  private picker?:PendingFilePicker;private uploads=new Uploads();
+  downloads=new Map<string,{name:string;body:Buffer}>();private downloading=0;private downloadBytes=0;
+  current?:Snapshot; private epoch=randomUUID(); private capture!:FrameCapture;
+  private timer?:NodeJS.Timeout; private closed=false; private captureSource='';
+  private lastError=''; private inputQueue=Promise.resolve(); private queued=0;
+  private events=new Map<string,number>(); private history=new Map<number,Snapshot>();
+  private inputRevision=0;
+  private pendingDialog?:{dialog:Dialog;info:BrowserDialogMessage};
+  private requestedUrl='';
+  private saveTimer?:NodeJS.Timeout;
+  private saveTask?:Promise<void>;
+  private persistenceError='';
+  private pollTask?:Promise<void>;
+  private lastViewActivity=0;private capturedAssetState='';
+  constructor(readonly owner:string,readonly config:Config,readonly policy:TargetPolicy,readonly deviceProfile:DeviceProfile,private store?:BrowserStore,private restoredState?:LoginState,restoredId?:string){if(restoredId)(this as {id:string}).id=restoredId;}
+  async start(url:string,viewport={width:1100,height:760}) {
+    this.requestedUrl=url;
+    viewport=this.deviceProfile.platform==='Android'?{...devices['Pixel 7'].viewport}:viewport;
+    this.viewport={...viewport};
+    await this.policy.assert(url);
+    if(this.closed)throw new Error('Session cancelled');
+    this.captureSource=await readFile(join(this.config.assetDir,'capture.js'),'utf8');
+    const proxy=this.config.proxy?{...this.config.proxy,bypass:[this.policy.fixtureOrigin,...this.policy.fixtureAliases].map(origin=>new URL(origin).host).join(',')}:undefined;
+    // Explicitly enable Chromium's sandbox. There is no --no-sandbox fallback.
+    this.browser=await chromium.launch({executablePath:this.config.chromiumPath,headless:true,chromiumSandbox:true,
+      proxy:this.config.proxy,args:['--disable-quic','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--disable-background-networking',
+        ...(this.config.proxy?[`--host-resolver-rules=${proxyHostResolverRules(this.config.proxy.server,[this.policy.fixtureOrigin,...this.policy.fixtureAliases])}`]:[])]});
+    if(this.closed){await this.browser.close();throw new Error('Session cancelled');}
+    const p=this.deviceProfile;
+    this.context=await this.browser.newContext({...(p.platform==='Android'?devices['Pixel 7']:{}),proxy,viewport,screen:{...p.screen},deviceScaleFactor:p.deviceScaleFactor,
+      locale:p.locale,timezoneId:p.timezoneId,colorScheme:p.colorScheme,isMobile:p.isMobile,hasTouch:p.hasTouch,
+      serviceWorkers:'block',acceptDownloads:true,permissions:['clipboard-write'],storageState:this.restoredState});
+    await this.context.route('**/*',async route=>{
+      try{await this.policy.assert(route.request().url());await route.continue();}catch{await route.abort('blockedbyclient').catch(()=>{});}
+    });
+    await this.context.routeWebSocket(/.*/,async socket=>{
+      try{const url=new URL(socket.url());if(!['ws:','wss:'].includes(url.protocol))throw new Error('Invalid socket scheme');url.protocol=url.protocol==='wss:'?'https:':'http:';await this.policy.assert(url.href);socket.connectToServer();}
+      catch{socket.close({code:1008,reason:'Target socket is not allowed'});}
+    });
+    this.context.on('response',response=>{void(async()=>{
+      const mime=(response.headers()['content-type']??'').split(';')[0];
+      if(!['image/png','image/jpeg','image/gif','image/webp','image/avif','image/svg+xml','audio/wav','audio/x-wav','audio/mpeg','audio/ogg','audio/webm','video/mp4','video/webm','video/ogg','font/woff2','font/woff','application/font-woff','application/font-woff2','font/ttf','font/otf','text/css'].includes(mime))return;
+      const length=Number(response.headers()['content-length']??0);if(length>2*1024*1024||this.assetBytes>16*1024*1024)return;
+      const body=await response.body();if(this.closed||body.length>2*1024*1024||this.assetBytes+body.length>16*1024*1024)return;
+      if(mime==='image/svg+xml'){if(this.svgSources.size<32&&this.svgBytes+body.length<=4*1024*1024&&!this.svgSources.has(response.url())){this.svgSources.set(response.url(),body.toString());this.svgBytes+=body.length;}return;}
+      if(mime==='text/css'){if(this.fontRules.size<100)this.fontRules.set(response.url(),fontsFromCss(body.toString(),response.url()));return;}
+      if(this.assetByUrl.has(response.url()))return;
+      const id=randomUUID();this.assets.set(id,{body,mime});this.assetByUrl.set(response.url(),id);this.assetBytes+=body.length;
+    })().catch(()=>{});});
+    await this.registerWindow(await this.context.newPage());
+    this.context.on('page',page=>{this.switching=this.switching.then(()=>this.registerWindow(page)).catch(()=>{void page.close();});});
+    try{await this.page.goto(url,{waitUntil:'domcontentloaded',timeout:20000});}catch(error){if(!this.pendingDialog)throw error;await this.page.waitForLoadState('domcontentloaded',{timeout:0});}
+    await this.poll();
+    this.schedule();
+    if(this.store){this.saveTimer=setInterval(()=>{void this.saveState().catch(()=>{});},10000);this.saveTimer.unref();await this.saveState();}
+  }
+  private async registerWindow(page:Page){
+    if(this.closed||this.windows.size>=3){await page.close();return;}
+    const id=randomUUID();const cdp=await this.context.newCDPSession(page);
+    await cdp.send('Page.enable');await cdp.send('Runtime.enable');
+    const capture=new FrameCapture(page,cdp,this.captureSource,this.svgSources);
+    this.windows.set(id,{page,cdp,capture,title:''});
+    this.watchDialogs(page);
+    page.on('filechooser',chooser=>{void(async()=>{this.uploads.clear();this.picker={id:randomUUID(),chooser,accept:(await chooser.element().getAttribute('accept'))?.slice(0,1024)??'',multiple:chooser.isMultiple()};})().catch(()=>{});});
+    page.on('download',download=>{void(async()=>{
+      if(this.downloading>=2||this.downloadBytes>=32*1024*1024){await download.cancel();return;}
+      this.downloading++;
+      try{const path=await download.path();if(!path)return;const size=(await stat(path)).size;if(size>16*1024*1024||this.downloadBytes+size>32*1024*1024)return;
+        const body=await readFile(path);if(this.closed)return;this.downloads.set(randomUUID(),{name:download.suggestedFilename().replace(/[\\/\x00-\x1f]/g,'_').slice(0,200)||'download',body});this.downloadBytes+=body.length;
+      }finally{this.downloading--;await download.delete().catch(()=>{});}
+    })().catch(()=>{});});
+    cdp.on('Page.frameNavigated',({frame})=>{if(!frame.parentId&&this.page===page){this.epoch=randomUUID();this.current=undefined;this.history.clear();this.picker=undefined;this.uploads.clear();}});
+    page.on('close',()=>{this.windows.delete(id);if(this.activeWindow===id&&!this.closed){const fallback=[...this.windows.keys()].at(-1);if(fallback)void this.selectWindow(fallback);}});
+    await this.selectWindow(id);
+  }
+  async selectWindow(id:string){
+    const window=this.windows.get(id);if(!window||window.page.isClosed())throw new Error('窗口不存在');
+    this.page=window.page;this.cdp=window.cdp;this.capture=window.capture;this.activeWindow=id;
+    this.epoch=randomUUID();this.current=undefined;this.history.clear();await this.metrics();await this.page.bringToFront();
+    this.picker=undefined;this.uploads.clear();
+  }
+  async closeWindow(){if(this.windows.size<2)throw new Error('仅剩主窗口，请使用结束会话');await this.page.close();}
+  private watchDialogs(page:Page){page.on('dialog',dialog=>{
+    if(this.closed){void dialog.dismiss().catch(()=>{});return;}
+    const origin=(()=>{try{return new URL(page.url()).origin;}catch{return '远端网页';}})();
+    const info:BrowserDialogMessage={type:'dialog',epoch:this.epoch,id:randomUUID(),kind:dialog.type() as BrowserDialogMessage['kind'],message:dialog.message().slice(0,10000),defaultValue:dialog.defaultValue().slice(0,10000),origin};
+    this.pendingDialog={dialog,info};this.broadcast(info);
+  });}
+  private async metrics(){await this.cdp.send('Emulation.setDeviceMetricsOverride',{
+    ...this.viewport,screenWidth:this.deviceProfile.screen.width,screenHeight:this.deviceProfile.screen.height,
+    deviceScaleFactor:this.deviceProfile.deviceScaleFactor,mobile:this.deviceProfile.isMobile,screenOrientation:{angle:0,type:this.deviceProfile.isMobile?'portraitPrimary':'landscapePrimary'}});}
+  view(){const wasIdle=Date.now()-this.lastViewActivity>=2000;this.lastViewActivity=Date.now();if(wasIdle&&this.timer){clearTimeout(this.timer);this.schedule();}}
+  private schedule(){if(!this.closed)this.timer=setTimeout(()=>{this.timer=undefined;void this.poll().finally(()=>this.schedule());},this.sockets.size||Date.now()-this.lastViewActivity<2000?60:1500);}
+  poll(force=false):Promise<void> {
+    if(this.pollTask)return this.pollTask;
+    const task=this.captureDocument(force);this.pollTask=task;
+    void task.finally(()=>{if(this.pollTask===task)this.pollTask=undefined;});return task;
+  }
+  async syncAfterInput(){
+    if(this.closed||this.pendingDialog)return;
+    await this.poll(true);
+    // A capture already in flight may predate the input. Never label that
+    // document as acknowledging the newer revision.
+    if(!this.closed&&!this.pendingDialog&&(!this.current||(this.current.inputRevision??-1)<this.inputRevision))await this.poll(true);
+  }
+  private async captureDocument(force=false) {
+    if(this.closed)return;
+    try {
+      const assetState=`${this.assetByUrl.size}:${this.fontRules.size}:${this.svgSources.size}:${this.persistenceError}`;
+      if(!force&&this.current&&assetState===this.capturedAssetState&&!await this.capture.needsCapture())return;
+      const epoch=this.epoch,revision=this.inputRevision;
+      const raw=await this.capture.capture();if(epoch!==this.epoch)return;
+      if(Buffer.byteLength(JSON.stringify(raw))>4*1024*1024)throw new Error('页面超过当前快照大小限制');
+      const document=sanitizeDocument(raw,url=>this.resource(url));
+      this.capturedAssetState=assetState;
+      document.inputRevision=revision;
+      document.persistenceError=this.persistenceError||undefined;
+      const active=this.windows.get(this.activeWindow);if(active)active.title=document.title;
+      document.windows=[...this.windows].map(([id,w])=>({id,title:w.title||'新窗口',active:id===this.activeWindow}));
+      document.filePicker=this.picker?{id:this.picker.id,accept:this.picker.accept,multiple:this.picker.multiple}:undefined;
+      document.downloads=[...this.downloads].map(([id,file])=>({id,name:file.name,size:file.body.length}));
+      document.fontFaces=[...this.fontRules.values()].flat().flatMap(font=>{
+        const id=font.urls.map(url=>this.assetByUrl.get(url)).find(Boolean);return id?[{family:font.family,style:font.style,weight:font.weight,unicodeRange:font.unicodeRange,assetUrl:`asset:${id}`}]:[];
+      }).slice(0,32);
+      this.lastError='';
+      if(!this.current){this.current=snapshot(document,this.epoch);this.broadcast(this.current);}
+      else {const patch=diff(this.current,document);if(patch){this.history.set(this.current.seq,this.current);while(this.history.size>8)this.history.delete(this.history.keys().next().value!);this.current=snapshot(document,this.epoch,patch.seq);this.broadcast(patch);}}
+    }catch(error){
+      if(this.closed)return;
+      const message=error instanceof Error&&error.message.includes('快照')?error.message:'页面正在导航或捕获暂不可用';
+      if(message!==this.lastError){this.lastError=message;this.broadcast({type:'error',message});}
+    }
+  }
+  attach(socket:WebSocket) {
+    monitorSocket(socket);
+    this.view();
+    this.lastActivity=Date.now();this.sockets.add(socket);const peer=randomUUID();this.events.set(peer,0);
+    if(this.current)this.send(socket,this.current);
+    if(this.pendingDialog)this.send(socket,this.pendingDialog.info);
+    socket.on('close',()=>{this.sockets.delete(socket);this.events.delete(peer);});
+    socket.on('message',data=>{
+      let message:unknown;try{message=JSON.parse(data.toString());}catch{return socket.close(1008,'Invalid JSON');}
+      if((message as {type?:string})?.type==='resync'){if(this.current)this.send(socket,this.current);return;}
+      if((message as {type?:string})?.type==='ping'){this.lastActivity=Date.now();this.send(socket,{type:'pong'});return;}
+      void this.submit(message as UserEvent,peer).then(response=>this.send(socket,response));
+    });
+  }
+  changes(epoch:string,seq:number){
+    if(this.pendingDialog)return this.pendingDialog.info;
+    if(this.lastError)return {type:'error' as const,message:this.lastError};
+    if(!this.current)return null;
+    if(epoch!==this.current.epoch)return this.current;
+    if(seq===this.current.seq)return null;
+    const previous=this.history.get(seq);if(!previous||previous.epoch!==epoch)return this.current;
+    const patch=diff(previous,this.current);return patch?{...patch,seq:this.current.seq}:null;
+  }
+  async submit(event:UserEvent,peer:string,captureAfter=true):Promise<ServerMessage>{
+    if(!this.validEvent(event))return {type:'error',message:'无效的输入事件'};
+    if(event.action==='dialog'){
+      const pending=this.pendingDialog;if(!pending||pending.info.id!==event.dialogId||typeof event.accept!=='boolean')return {type:'error',message:'提示框已改变',eventId:event.eventId};
+      try{if(event.accept)await pending.dialog.accept(event.value??'');else await pending.dialog.dismiss();if(this.pendingDialog===pending)this.pendingDialog=undefined;this.inputRevision++;return {type:'ack',eventId:event.eventId,inputRevision:this.inputRevision};}catch{return {type:'error',message:'提示框操作失败',eventId:event.eventId};}
+    }
+    if(event.epoch!==this.epoch)return {type:'error',message:'页面已改变，请等待重新同步',eventId:event.eventId};
+    if(!this.events.has(peer)&&this.events.size>=8)return {type:'error',message:'输入连接数量已达上限',eventId:event.eventId};
+    if(event.eventId<=(this.events.get(peer)??0)||this.queued>=80)return {type:'error',message:'事件过期或输入队列已满',eventId:event.eventId};
+    this.events.set(peer,event.eventId);this.queued++;this.lastActivity=Date.now();
+    this.view();
+    let respond!:(value:ServerMessage)=>void;const result=new Promise<ServerMessage>(resolve=>respond=resolve);
+    this.inputQueue=this.inputQueue.then(async()=>{
+      try{if(this.closed||event.epoch!==this.epoch)throw new Error('stale');const clipboard=await this.applyEvent(event);if(event.action!=='hover')this.inputRevision++;respond(typeof clipboard==='string'?{type:'clipboard',text:clipboard,eventId:event.eventId,inputRevision:this.inputRevision}:{type:'ack',eventId:event.eventId,inputRevision:this.inputRevision});}
+      catch{respond({type:'error',message:'操作未完成，请重试',eventId:event.eventId});}
+      finally{this.queued--;if(captureAfter&&!this.pendingDialog)void this.syncAfterInput().catch(()=>{});}
+    });return result;
+  }
+  private validEvent(event:UserEvent):boolean {
+    return !!event&&event.type==='event'&&Number.isSafeInteger(event.eventId)&&event.eventId>0&&typeof event.epoch==='string'
+      &&['click','hover','focus','input','key','scroll','viewport','select','navigation','dialog','media','pointer'].includes(event.action)
+      &&(event.nodeId===undefined||/^n\d+$/.test(event.nodeId))
+      &&(event.clickCount===undefined||Number.isInteger(event.clickCount)&&event.clickCount>=1&&event.clickCount<=3)
+      &&(event.value===undefined||typeof event.value==='string'&&event.value.length<=10000);
+  }
+  private async evaluate(expression:string,frame?:CaptureFrame) {return this.capture.evaluate(frame??this.capture.main,expression);}
+  private async applyEvent(event:UserEvent) {
+    if(event.action==='navigation'){if(!['back','forward','reload'].includes(event.key??''))throw new Error('Invalid navigation');await this.navigation(event.key as 'back'|'forward'|'reload');return;}
+    if(event.action==='viewport'){
+      if(!Number.isFinite(event.width)||!Number.isFinite(event.height))throw new Error('Invalid viewport');
+      // Playwright setViewportSize also replaces screen dimensions. Override only
+      // the viewport through CDP so a window resize never changes device identity.
+      this.viewport={width:Math.max(160,Math.min(3840,Math.round(event.width!))),height:Math.max(160,Math.min(2160,Math.round(event.height!)))};
+      await this.metrics();return;
+    }
+    if(event.action==='pointer'){
+      if(!['down','move','up'].includes(event.key??'')||!Number.isFinite(event.x)||!Number.isFinite(event.y))throw new Error('Invalid pointer');
+      const x=Math.max(0,Math.min(this.viewport.width,event.x!)),y=Math.max(0,Math.min(this.viewport.height,event.y!));
+      await this.page.mouse.move(x,y);if(event.key==='down')await this.page.mouse.down();if(event.key==='up')await this.page.mouse.up();return;
+    }
+    if(event.nodeId&&!this.current?.nodes.some(n=>n.id===event.nodeId))throw new Error('Stale node');
+    const route=this.capture.route(event.nodeId);if(!route)throw new Error('Frame is not ready');
+    const evaluate=(expression:string)=>this.evaluate(expression,route.frame);
+    const node=`window.__remoteDom.node(${JSON.stringify(route.localId)})`;
+    if(event.action==='media'){
+      if(!['play','pause','seek','volume','muted','rate'].includes(event.key??''))throw new Error('Invalid media operation');
+      const value=event.mediaValue;if(['seek','volume','rate'].includes(event.key??'')&&(!Number.isFinite(value)||value!<0||value!>86400))throw new Error('Invalid media value');
+      await evaluate(`(async()=>{const n=${node};if(!(n instanceof HTMLMediaElement))throw new Error('Not media');switch(${JSON.stringify(event.key)}){case 'play':await n.play();break;case 'pause':n.pause();break;case 'seek':n.currentTime=${value??0};break;case 'volume':n.volume=Math.max(0,Math.min(1,${value??0}));break;case 'muted':n.muted=${event.accept===true};break;case 'rate':n.playbackRate=Math.max(.25,Math.min(4,${value??1}));break;}})()`);return;
+    }
+    if(event.action==='focus'){await evaluate(`(()=>{const n=${node};if(n instanceof HTMLElement)n.focus({preventScroll:true});})()`);return;}
+    if(event.action==='scroll'){
+      if(!Number.isFinite(event.x)||!Number.isFinite(event.y))throw new Error('Invalid scroll');
+      const x=Math.max(0,Math.min(1e7,event.x!)),y=Math.max(0,Math.min(1e7,event.y!));
+      const windowFrame=event.nodeId?this.capture.frameWindows.get(event.nodeId):route.frame;
+      if(windowFrame)await this.evaluate(`window.scrollTo(${x},${y})`,windowFrame);else await evaluate(`${node}?.scrollTo(${x},${y})`);return;
+    }
+    if(event.action==='click'||event.action==='hover'){
+      if(event.clipboard&&event.action==='click'){
+        const origin=new URL(this.page.url()).origin,marker=randomUUID();let ready=false;
+        try{await this.context.grantPermissions(['clipboard-read','clipboard-write'],{origin});await this.evaluate(`navigator.clipboard.writeText(${JSON.stringify(marker)})`);ready=true;}catch{}
+        try{await this.capture.click(route,event.x,event.y,false,event);if(ready){for(let attempt=0;attempt<5;attempt++){const text=await this.evaluate('navigator.clipboard.readText()');if(typeof text==='string'&&text!==marker){if(text.length>1024*1024)throw new Error('Clipboard exceeds 1 MiB');return text;}await new Promise(resolve=>setTimeout(resolve,80));}}}
+        finally{await this.context.clearPermissions();await this.context.grantPermissions(['clipboard-write']);}
+        return;
+      }
+      await this.capture.click(route,event.x,event.y,event.action==='hover',event);return;
+    }
+    if(event.action==='input'){
+      const ready=await evaluate(`(()=>{const n=${node};if(n instanceof HTMLElement&&n.isContentEditable){n.focus();const range=document.createRange();range.selectNodeContents(n);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);return true;}if(!(n instanceof HTMLInputElement||n instanceof HTMLTextAreaElement)||n.disabled||n.readOnly)return false;if(n instanceof HTMLInputElement&&!['text','password','email','search','url','tel','number'].includes(n.type))return false;n.focus();n.select();return true;})()`);
+      if(!ready)throw new Error('Unsupported input');
+      if(event.value)await this.page.keyboard.insertText(event.value);else await this.page.keyboard.press('Backspace');
+      if(Number.isInteger(event.selectionStart)&&Number.isInteger(event.selectionEnd))await evaluate(`(()=>{const n=${node};try{if(n instanceof HTMLElement&&n.isContentEditable){const walk=document.createTreeWalker(n,NodeFilter.SHOW_TEXT);const text=[];while(walk.nextNode())text.push(walk.currentNode);const position=offset=>{for(const item of text){if(offset<=item.textContent.length)return [item,offset];offset-=item.textContent.length;}return [n,n.childNodes.length]};const start=position(${Math.max(0,event.selectionStart!)}),end=position(${Math.max(0,event.selectionEnd!)});const range=document.createRange();range.setStart(...start);range.setEnd(...end);getSelection().removeAllRanges();getSelection().addRange(range);return;}n.setSelectionRange(${Math.max(0,event.selectionStart!)},${Math.max(0,event.selectionEnd!)});}catch{}})()`);
+      return;
+    }
+    if(event.action==='key'){
+      if(!event.key||!/^(Enter|Tab|Escape|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Backspace|Delete|F[1-9]|F1[0-2]|[\x20-\x7e])$/.test(event.key))throw new Error('Unsupported key');
+      if(event.nodeId)await evaluate(`(()=>{const n=${node};if(n instanceof HTMLElement)n.focus({preventScroll:true});})()`);
+      const keys=[event.ctrl||event.meta?'Control':'',event.alt?'Alt':'',event.shift?'Shift':''].filter(Boolean);
+      try{for(const key of keys)await this.page.keyboard.down(key);await this.page.keyboard.press(event.key);}finally{for(const key of keys.reverse())await this.page.keyboard.up(key);}return;
+    }
+    if(event.action==='select'){
+      await evaluate(`(()=>{const n=${node};if(n instanceof HTMLSelectElement)n.value=${JSON.stringify(event.value??'')};else if(n instanceof HTMLInputElement&&['range','color','date','time','datetime-local','month','week'].includes(n.type)){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(n,${JSON.stringify(event.value??'')});}else throw new Error('not-control');n.dispatchEvent(new Event('input',{bubbles:true,composed:true}));n.dispatchEvent(new Event('change',{bubbles:true,composed:true}));})()`);
+    }
+  }
+  private resource(url:string){
+    if(!url.startsWith('data:'))return this.assetByUrl.get(url);
+    if(url.length>2800000)return;
+    const match=url.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/);if(!match)return;
+    const key='inline:'+createHash('sha256').update(url).digest('hex');const existing=this.assetByUrl.get(key);if(existing)return existing;
+    const body=Buffer.from(match[2],'base64');if(body.length>2*1024*1024||this.assetBytes+body.length>16*1024*1024)return;
+    const id=randomUUID();this.assets.set(id,{body,mime:match[1]});this.assetByUrl.set(key,id);this.assetBytes+=body.length;return id;
+  }
+  async upload(request:Record<string,unknown>){
+    if(request.action==='dismiss-picker'){
+      if(!this.picker||request.pickerId!==this.picker.id||request.epoch!==this.epoch)throw new Error('文件选择请求已失效');
+      const sync=request.sync as {epoch?:string;seq?:number}|undefined;
+      if(sync&&(typeof sync.epoch!=='string'||sync.epoch.length>100||!Number.isSafeInteger(sync.seq)||sync.seq!< -1))throw new Error('无效同步位置');
+      this.uploads.clear();this.picker=undefined;await this.syncAfterInput();
+      return {ok:true,update:sync?this.changes(sync.epoch!,sync.seq!):null};
+    }
+    const result=await this.uploads.handle(request,this.epoch,this.picker);if('finished'in result&&result.finished)this.picker=undefined;return result;
+  }
+  saveState():Promise<void>{
+    if(this.saveTask)return this.saveTask;
+    const store=this.store;if(!store||!this.context||!this.browser?.isConnected()||this.pendingDialog)return Promise.resolve();
+    const task=(async()=>{
+      try{
+        const state=await this.context.storageState({indexedDB:true});if(this.store!==store)return;
+        await store.save({id:this.id,owner:this.owner,url:this.current?.url??this.requestedUrl,title:this.current?.title??'已保存的浏览器',savedAt:new Date().toISOString(),state});
+        this.persistenceError='';
+      }catch(error){
+        const message='浏览器环境未能保存，当前登录状态可能在关闭后丢失。请保持页面打开并联系管理员。';
+        if(!this.persistenceError){console.error('Browser state persistence failed:',error instanceof Error?error.name:'unknown');this.broadcast({type:'error',message});}
+        this.persistenceError=message;throw new Error(message);
+      }
+    })();
+    this.saveTask=task;void task.then(()=>{if(this.saveTask===task)this.saveTask=undefined;},()=>{if(this.saveTask===task)this.saveTask=undefined;});return task;
+  }
+  disablePersistence(){clearInterval(this.saveTimer);this.store=undefined;}
+  async navigate(url:string){await this.policy.assert(url);await this.page.goto(url,{waitUntil:'domcontentloaded',timeout:20000});}
+  async navigation(action:'back'|'forward'|'reload'){
+    if(action==='back')await this.page.goBack({waitUntil:'domcontentloaded'});
+    else if(action==='forward')await this.page.goForward({waitUntil:'domcontentloaded'});
+    else await this.page.reload({waitUntil:'domcontentloaded'});
+  }
+  send(socket:WebSocket,message:ServerMessage){if(socket.readyState===WebSocket.OPEN){if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
+  private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
+  summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,persistenceError:this.persistenceError||undefined};}
+  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();}
+}

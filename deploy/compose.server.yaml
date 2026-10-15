@@ -1,0 +1,80 @@
+# Account control and per-account dynamic containers; HTTPS uses host nginx.
+name: remote-dom-browser
+services:
+  worker-image:
+    profiles: [build]
+    image: remote-dom-engine:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+      target: engine
+  control:
+    container_name: remote-dom-control
+    image: remote-dom-control:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+      target: control
+    init: true
+    restart: unless-stopped
+    user: "1000:1000"
+    group_add: ["${DOCKER_GID:?Set Docker socket group id}"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    ports: ["127.0.0.1:4174:4174"]
+    volumes:
+      - control-state:/var/lib/remote-dom-control
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    secrets: [admin-password]
+    environment:
+      CONTROL_HOST: 0.0.0.0
+      CONTROL_PORT: 4174
+      CONTROL_PUBLIC_ORIGIN: https://${BROWSER_DOMAIN:?Set the browser domain}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD_FILE: /run/secrets/admin-password
+      WORKER_IMAGE: remote-dom-engine:local
+      WORKER_PREFIX: rd-browser
+      CONTROLLER_CONTAINER: remote-dom-control
+      PROXY_CONTAINER: remote-dom-egress
+      RELAY_IMAGE: remote-dom-control:local
+      WORKER_EGRESS_NETWORK: remote-dom-browser_egress
+      MAX_RUNNING_CONTAINERS: ${MAX_RUNNING_CONTAINERS:-4}
+      WORKER_IDLE_MINUTES: ${WORKER_IDLE_MINUTES:-30}
+      WORKER_MEMORY_MB: ${WORKER_MEMORY_MB:-2048}
+      WORKER_CPUS: ${WORKER_CPUS:-2}
+      DEFAULT_TARGET_URL: https://claude.ai/
+    networks: [ingress, management]
+    depends_on: [egress-proxy]
+    healthcheck:
+      test: [CMD, node, -e, "require('node:http').get({hostname:'127.0.0.1',port:4174,path:'/account',headers:{Host:new URL(process.env.CONTROL_PUBLIC_ORIGIN).host}},r=>{r.resume();if(r.statusCode!==200)process.exit(1)}).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+  egress-proxy:
+    container_name: remote-dom-egress
+    image: ubuntu/squid:latest
+    entrypoint: [/usr/sbin/squid]
+    command: [-N, -f, /etc/squid/squid.conf]
+    user: proxy
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 64
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    volumes: ["./squid.conf:/etc/squid/squid.conf:ro"]
+    networks: [management, egress]
+networks:
+  ingress: {}
+  management:
+    internal: true
+  egress: {}
+volumes:
+  control-state: {}
+secrets:
+  admin-password:
+    file: ./secrets/admin-password

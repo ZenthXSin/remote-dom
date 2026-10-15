@@ -1,0 +1,33 @@
+{
+  "name": "remote-dom-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/server/main.js",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:e2e": "node --import tsx --test --test-concurrency=1 tests/e2e/*.test.ts",
+    "check": "npm run typecheck && npm run build && npm test && npm run test:e2e"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "css-tree": "3.2.1",
+    "ipaddr.js": "2.5.0",
+    "playwright-core": "1.64.0",
+    "ws": "8.22.0",
+    "https-proxy-agent": "9.1.0"
+  },
+  "devDependencies": {
+    "@types/css-tree": "3.2.0",
+    "@types/node": "26.6.5",
+    "@types/ws": "8.18.2",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0"
+}

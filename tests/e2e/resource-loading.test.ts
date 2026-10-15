@@ -1,0 +1,54 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {chromium} from 'playwright-core';
+import {createApp} from '../../src/server/app.js';
+import {readConfig} from '../../src/server/config.js';
+
+test('slow resources do not block controls; late images, backgrounds and fonts preserve input and scroll',{timeout:45000},async t=>{
+  const config=readConfig({...process.env,PORT:'0',ENGINE_MODE:'demo',ENGINE_HOST:'127.0.0.1'});
+  const app=await createApp(config);t.after(()=>app.close());
+  const browser=await chromium.launch({executablePath:config.chromiumPath,headless:true,chromiumSandbox:true});t.after(()=>browser.close());
+  const page=await browser.newPage({viewport:{width:1440,height:1000},extraHTTPHeaders:{'X-Engine-Http-Transport':'1'}});
+  let release!:()=>void;const gate=new Promise<void>(resolve=>release=resolve);t.after(()=>release());
+  const localRequests:string[]=[];page.on('request',request=>localRequests.push(request.url()));
+  await page.route('**/assets/*',async route=>{await gate;await route.continue();});
+  await page.goto(app.origin);await page.getByRole('textbox',{name:'目标网址'}).fill(app.fixtureOrigin+'/resource-controls');
+  await page.getByRole('button',{name:'新建浏览器',exact:true}).click();const mirror=page.frameLocator('#mirror');
+  await mirror.getByRole('heading',{name:'Resource controls'}).waitFor({timeout:8000});
+  await mirror.getByRole('button',{name:'Resource action'}).click();await mirror.getByText('1',{exact:true}).waitFor({timeout:4000});
+  const input=mirror.getByRole('textbox',{name:'Resource input'});await input.fill('资源迟到也保留中文');
+  await mirror.getByText('Remote resource text: 资源迟到也保留中文',{exact:true}).waitFor({timeout:4000});
+  const session=[...app.sessions.values()][0];const frame=page.frames().find(frame=>frame.url().endsWith('/mirror'))!;
+  await frame.evaluate(()=>scrollTo(0,450));await session.page.waitForFunction(()=>scrollY>=440);
+  release();
+  const image=mirror.getByAltText('Delayed image');await image.evaluate(async node=>{for(let i=0;i<60;i++){const image=node as HTMLImageElement;if(image.src.startsWith('blob:')&&image.complete&&image.naturalWidth>0)return;await new Promise(resolve=>setTimeout(resolve,50));}throw new Error('Late image was not painted');});
+  const background=mirror.getByLabel('Background image');assert.match(await background.evaluate(node=>getComputedStyle(node).backgroundImage),/blob:/);
+  assert.match(await mirror.getByLabel('Resource pseudo').evaluate(node=>getComputedStyle(node,'::before').backgroundImage),/blob:/);
+  await frame.waitForFunction(()=>[...document.fonts].some(face=>face.family==='ResourceTest'&&face.status==='loaded'));
+  assert.equal(await input.inputValue(),'资源迟到也保留中文');assert.ok(await frame.evaluate(()=>scrollY)>=440);
+  assert.equal(localRequests.some(url=>url.startsWith(app.fixtureOrigin)),false,'target resources must still use the owned channel');
+  assert.equal(await frame.evaluate(()=>typeof(window as unknown as Record<string,unknown>).__RESOURCE_SCRIPT),'undefined');
+  await page.locator('.advanced-tools').evaluate(node=>{(node as HTMLDetailsElement).open=true;});await page.getByRole('button',{name:'重新同步'}).click();assert.equal(await input.inputValue(),'资源迟到也保留中文');
+});
+
+test('failed resource loading can be retried, and switching browsers cancels obsolete downloads',{timeout:40000},async t=>{
+  const config=readConfig({...process.env,PORT:'0',ENGINE_MODE:'demo',ENGINE_HOST:'127.0.0.1'});const app=await createApp(config);t.after(()=>app.close());
+  const browser=await chromium.launch({executablePath:config.chromiumPath,headless:true,chromiumSandbox:true});t.after(()=>browser.close());
+  const page=await browser.newPage({viewport:{width:1440,height:1000},extraHTTPHeaders:{'X-Engine-Http-Transport':'1'}});
+  let fail=true;await page.route('**/assets/*',async route=>{if(fail)await route.fulfill({status:503,body:'Temporary failure'});else await route.continue();});
+  await page.goto(app.origin);await page.getByRole('button',{name:'打开体验页面'}).click();const mirror=page.frameLocator('#mirror');
+  await mirror.getByRole('heading',{name:'这段页面，在你的浏览器渲染。'}).waitFor();
+  await mirror.getByRole('button',{name:'远端计数 +1'}).click();await mirror.getByText('1',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'重试加载',exact:true}).waitFor();fail=false;await page.getByRole('button',{name:'重试加载',exact:true}).click();
+  await mirror.getByAltText('经授权资源通道传输的测试图片').evaluate(async node=>{for(let i=0;i<50;i++){const image=node as HTMLImageElement;if(image.src.startsWith('blob:')&&image.complete&&image.naturalWidth>0)return;await new Promise(resolve=>setTimeout(resolve,50));}throw new Error('Resource retry failed');});
+  await page.waitForFunction(()=>document.getElementById('resource-state')!.hidden);
+  let release!:()=>void;const gate=new Promise<void>(resolve=>release=resolve);t.after(()=>release());let started=false;
+  await page.route('**/assets/*',async route=>{started=true;await gate;await route.continue().catch(()=>{});});
+  await page.getByRole('textbox',{name:'目标网址'}).fill(app.fixtureOrigin+'/resource-controls');await page.getByRole('button',{name:'新建浏览器',exact:true}).click();
+  await mirror.getByRole('heading',{name:'Resource controls'}).waitFor();for(let i=0;i<40&&!started;i++)await page.waitForTimeout(50);assert.ok(started);
+  const ids=[...app.sessions.keys()];await page.getByRole('combobox',{name:'切换会话'}).selectOption(ids[0]);
+  await mirror.getByRole('heading',{name:'这段页面，在你的浏览器渲染。'}).waitFor();release();
+  await mirror.getByRole('button',{name:'远端计数 +1'}).click();await mirror.getByText('2',{exact:true}).waitFor();
+  const frame=page.frames().find(frame=>frame.url().endsWith('/mirror'))!;
+  assert.equal(await frame.evaluate(()=>[...document.fonts].some(face=>face.family==='ResourceTest')),false,'old-browser fonts must not enter the selected page');
+});

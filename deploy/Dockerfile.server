@@ -1,0 +1,42 @@
+# Buildable on the owned server; optional proxy CA for managed build environments.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -s /run/secrets/proxy_ca ]; then NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca npm ci --ignore-scripts --strict-ssl=true; else npm ci --ignore-scripts --strict-ssl=true; fi
+COPY src ./src
+COPY scripts/build.mjs ./scripts/build.mjs
+RUN npm run build && npm prune --omit=dev --ignore-scripts
+
+FROM node:22-bookworm-slim AS runtime
+WORKDIR /app
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node package.json ./package.json
+COPY --chown=node:node deploy/chromium-seccomp.json ./deploy/chromium-seccomp.json
+RUN mkdir -p /var/lib/remote-dom /var/lib/remote-dom-gateway /var/lib/remote-dom-control \
+    && chown node:node /var/lib/remote-dom /var/lib/remote-dom-gateway /var/lib/remote-dom-control \
+    && chmod 0700 /var/lib/remote-dom /var/lib/remote-dom-gateway /var/lib/remote-dom-control
+
+FROM runtime AS control
+USER node
+CMD ["node", "dist/control/main.js"]
+
+FROM runtime AS gateway
+USER node
+CMD ["node", "dist/gateway/main.js"]
+
+FROM runtime AS engine
+USER root
+RUN --mount=type=secret,id=proxy_ca \
+    : > /tmp/build-ca.pem \
+    && if [ -s /etc/ssl/certs/ca-certificates.crt ]; then cat /etc/ssl/certs/ca-certificates.crt >> /tmp/build-ca.pem; fi \
+    && if [ -s /run/secrets/proxy_ca ]; then cat /run/secrets/proxy_ca >> /tmp/build-ca.pem; fi \
+    && if [ -s /tmp/build-ca.pem ]; then set -- -o Acquire::https::CaInfo=/tmp/build-ca.pem; else set --; fi \
+    && apt-get "$@" -o Acquire::http::Proxy="$HTTP_PROXY" -o Acquire::https::Proxy="$HTTPS_PROXY" update \
+    && DEBIAN_FRONTEND=noninteractive apt-get "$@" -o Acquire::http::Proxy="$HTTP_PROXY" -o Acquire::https::Proxy="$HTTPS_PROXY" install -y --no-install-recommends chromium fonts-noto-cjk ca-certificates libnss3-tools locales tzdata \
+    && localedef -i en_US -f UTF-8 en_US.UTF-8 \
+    && rm -f /tmp/build-ca.pem && rm -rf /var/lib/apt/lists/*
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US:en TZ=America/Chicago CHROMIUM_PATH=/usr/bin/chromium XDG_CONFIG_HOME=/tmp/remote-dom-config XDG_CACHE_HOME=/tmp/remote-dom-cache
+USER node
+CMD ["node", "dist/server/main.js"]
