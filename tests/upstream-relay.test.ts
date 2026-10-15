@@ -10,3 +10,11 @@ test('personal proxy connections reject private literals and private DNS answers
  await assert.rejects(()=>createUpstreamRelay({profile}),/公网地址/);
  const {publicProxyLookup}=await import('../src/server/proxy-network.js');await assert.rejects(()=>new Promise((resolve,reject)=>publicProxyLookup('localhost',{all:true},(error,addresses)=>error?reject(error):resolve(addresses))),/公网地址/);
 });
+
+test('IPv4-only relay pins CONNECT and HTTP targets while retaining HTTP Host and refuses IPv6-only destinations',async t=>{
+ const seen:{path?:string;host?:string}[]=[];const sockets=new Set<import('node:net').Socket>();const upstream=createServer((req,res)=>{seen.push({path:req.url,host:req.headers.host});res.end('ok');});upstream.on('connection',s=>{sockets.add(s);s.on('close',()=>sockets.delete(s));});upstream.on('connect',(req,s)=>{seen.push({path:req.url,host:req.headers.host});s.end('HTTP/1.1 200 Connection Established\r\n\r\n');});await new Promise<void>(r=>upstream.listen(0,'127.0.0.1',r));t.after(()=>{for(const s of sockets)s.destroy();upstream.close();});
+ const relay=await createUpstreamRelay({profile:{id:'test',name:'test',mode:'custom',enabled:true,maxAccounts:1,server:`http://127.0.0.1:${(upstream.address() as {port:number}).port}`},ipv4Only:true,assertTarget:async()=>{},resolveAddresses:async h=>h==='v6.example'?[{address:'2606:4700::1111'}]:h==='private.example'?[{address:'127.0.0.1'}]:[{address:'2606:4700::1111'},{address:'93.184.216.34'}]});t.after(()=>relay.close());
+ const call=(method:string,path:string)=>new Promise<number>((resolve,reject)=>{const r=request({hostname:'127.0.0.1',port:new URL(relay.origin).port,method,path},res=>{res.resume();resolve(res.statusCode!);});r.on('connect',(res,s)=>{s.destroy();resolve(res.statusCode!);});r.on('error',reject);r.end();});
+ assert.equal(await call('CONNECT','example.com:443'),200);assert.equal(seen[0].path,'93.184.216.34:443');assert.equal(await call('GET','http://example.com/test?q=1'),200);assert.deepEqual(seen[1],{path:'http://93.184.216.34/test?q=1',host:'example.com'});
+ assert.equal(await call('CONNECT','v6.example:443'),403);assert.equal(await call('CONNECT','private.example:443'),403);assert.equal(seen.length,2);
+});

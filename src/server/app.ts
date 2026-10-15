@@ -96,7 +96,7 @@ export async function createApp(config:Config,running?:RunningAppState) {
       if(!match[2]&&req.method==='GET'){reply(res,200,session.summary());return;}
       if(match[2]==='diagnostics'){
         if(req.method==='GET'){reply(res,200,session.diagnostics.report());return;}
-        if(req.method==='POST'){const request=await body(req);if(request.action==='start'){session.diagnostics.start();session.diagnostics.add('environment',{proxyConfigured:!!config.proxy,platform:deviceProfile.platform});reply(res,200,session.diagnostics.report());return;}if(request.action==='stop'){reply(res,200,session.diagnostics.stop());return;}throw new Error('无效记录操作');}
+        if(req.method==='POST'){const request=await body(req);if(request.action==='start'){reply(res,200,await session.startDiagnostics());return;}if(request.action==='stop'){reply(res,200,await session.stopDiagnostics());return;}throw new Error('无效记录操作');}
       }
       if(match[2]==='windows'&&req.method==='POST'){const request=await body(req);if(request.action==='close')await session.closeWindow();else if(typeof request.id==='string')await session.selectWindow(request.id);else throw new Error('缺少窗口编号');reply(res,200,{ok:true});return;}
       if(match[2]==='uploads'&&req.method==='POST'){reply(res,200,await session.upload(await body(req,65000)),/\bgzip\b/.test(req.headers['accept-encoding']??''));return;}

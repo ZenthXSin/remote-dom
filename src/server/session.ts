@@ -1,4 +1,4 @@
-import {Diagnostics,diagnosticTarget} from './diagnostics.js';
+import {Diagnostics,diagnosticTarget,diagnosticCookies,diagnosticSetCookies} from './diagnostics.js';
 import {randomUUID,createHash} from 'node:crypto';
 import {readFile,stat} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -20,7 +20,7 @@ import {AssetTransit} from './asset-transit.js';
 import {ASSET_MIMES,MAX_ASSET_BYTES,fetchAsset,type AssetBody,type AssetSource} from './asset-source.js';
 
 export class RemoteSession {
-  readonly diagnostics=new Diagnostics();
+  readonly diagnostics=new Diagnostics(()=>{for(const window of this.windows.values())void window.cdp.send('Network.disable').catch(()=>{});});
   readonly id=randomUUID(); readonly created=Date.now(); lastActivity=Date.now();
   browser!:Browser; context!:BrowserContext; page!:Page; cdp!:CDPSession;
   private renderFlow=new WeakMap<WebSocket,{enabled:boolean;waiting?:{epoch:string;seq:number}}>();
@@ -63,7 +63,7 @@ export class RemoteSession {
       locale:p.locale,timezoneId:p.timezoneId,colorScheme:p.colorScheme,isMobile:p.isMobile,hasTouch:p.hasTouch,
       serviceWorkers:'block',acceptDownloads:true,permissions:['clipboard-write'],storageState:this.restoredState});
     await this.context.route('**/*',async route=>{
-      try{await this.policy.assert(route.request().url());await route.continue();}catch{await route.abort('blockedbyclient').catch(()=>{});}
+      try{await this.policy.assert(route.request().url());await route.continue();}catch(error){this.diagnostics.add('policy-block',{...diagnosticTarget(route.request().url()),reason:error instanceof Error&&error.message.includes('DNS')?'dns-validation-failed':'target-not-allowed'});await route.abort('blockedbyclient').catch(()=>{});}
     });
     await this.context.routeWebSocket(/.*/,async socket=>{
       try{const url=new URL(socket.url());if(!['ws:','wss:'].includes(url.protocol))throw new Error('Invalid socket scheme');url.protocol=url.protocol==='wss:'?'https:':'http:';await this.policy.assert(url.href);socket.connectToServer();}
@@ -100,9 +100,11 @@ export class RemoteSession {
     const capture=new FrameCapture(page,cdp,this.captureSource,this.svgSources);
     this.windows.set(id,{page,cdp,capture,title:''});
     this.watchDialogs(page);
+    cdp.on('Network.responseReceivedExtraInfo',event=>{if(!this.diagnostics.active)return;for(const blocked of event.blockedCookies??[]){const name=blocked.cookie?.name??blocked.cookieLine.split('=',1)[0];if(name==='cf_clearance'||name==='__cf_bm')this.diagnostics.add('cookie-rejected',{window:id,cookie:name,reasons:blocked.blockedReasons});}});
+    if(this.diagnostics.active)await cdp.send('Network.enable');
     const requestIds=new WeakMap<object,{id:number;at:number}>();let requestCounter=0;
-    page.on('request',request=>{if(!this.diagnostics.active)return;const info={id:++requestCounter,at:performance.now()};requestIds.set(request,info);this.diagnostics.add('request',{window:id,request:info.id,method:request.method(),resource:request.resourceType(),...diagnosticTarget(request.url()),redirect:!!request.redirectedFrom()});});
-    page.on('response',response=>{if(!this.diagnostics.active)return;const info=requestIds.get(response.request());const headers=response.headers();this.diagnostics.add('response',{window:id,request:info?.id,status:response.status(),ms:info?Math.round(performance.now()-info.at):undefined,...diagnosticTarget(response.url()),challenge:headers['cf-mitigated']==='challenge',ray:/^[a-zA-Z0-9-]{1,80}$/.test(headers['cf-ray']??'')?headers['cf-ray']:undefined});});
+    page.on('request',request=>{if(!this.diagnostics.active)return;const info={id:++requestCounter,at:performance.now()};requestIds.set(request,info);this.diagnostics.add('request',{window:id,request:info.id,method:request.method(),resource:request.resourceType(),...diagnosticTarget(request.url()),redirect:!!request.redirectedFrom()});void request.allHeaders().then(headers=>this.diagnostics.add('request-cookies',{window:id,request:info.id,...diagnosticCookies(headers.cookie)})).catch(()=>{});});
+    page.on('response',response=>{if(!this.diagnostics.active)return;const info=requestIds.get(response.request());const headers=response.headers();this.diagnostics.add('response',{window:id,request:info?.id,status:response.status(),ms:info?Math.round(performance.now()-info.at):undefined,...diagnosticTarget(response.url()),challenge:headers['cf-mitigated']==='challenge',ray:/^[a-zA-Z0-9-]{1,80}$/.test(headers['cf-ray']??'')?headers['cf-ray']:undefined});void response.headersArray().then(headers=>this.diagnostics.add('response-cookies',{window:id,request:info?.id,...diagnosticSetCookies(headers)})).catch(()=>{});});
     page.on('requestfailed',request=>{const info=requestIds.get(request);const failure=request.failure()?.errorText??'';this.diagnostics.add('request-failed',{window:id,request:info?.id,...diagnosticTarget(request.url()),reason:failure.match(/net::ERR_[A-Z_]+/)?.[0]??'failed'});});
     page.on('framenavigated',frame=>this.diagnostics.add('navigation',{window:id,main:frame===page.mainFrame(),...diagnosticTarget(frame.url())}));
     page.on('pageerror',()=>this.diagnostics.add('page-script-error',{window:id}));
@@ -119,6 +121,15 @@ export class RemoteSession {
     page.on('close',()=>{this.windows.delete(id);if(this.activeWindow===id&&!this.closed){const fallback=[...this.windows.keys()].at(-1);if(fallback)void this.selectWindow(fallback);}});
     await this.selectWindow(id);
   }
+  async startDiagnostics(){
+    this.diagnostics.start();
+    await Promise.all([...this.windows.values()].map(async window=>{await window.cdp.send('Network.enable').catch(()=>{});}));
+    const cookies=await this.context.cookies(this.page.url()).catch(()=>[]);
+    this.diagnostics.add('cookie-baseline',{clearance:cookies.some(c=>c.name==='cf_clearance'),botManagement:cookies.some(c=>c.name==='__cf_bm')});
+    this.diagnostics.add('environment',{proxyConfigured:!!this.config.proxy,platform:this.deviceProfile.platform});
+    return this.diagnostics.report();
+  }
+  async stopDiagnostics(){const report=this.diagnostics.stop();await Promise.all([...this.windows.values()].map(window=>window.cdp.send('Network.disable').catch(()=>{})));return report;}
   async selectWindow(id:string){
     const window=this.windows.get(id);if(!window||window.page.isClosed())throw new Error('窗口不存在');
     this.page=window.page;this.cdp=window.cdp;this.capture=window.capture;this.activeWindow=id;
