@@ -32,3 +32,12 @@ test('retained streaming snapshots share unchanged records without modifying his
  const removed=structuredClone(initial);removed.nodes.pop();removed.nodes[0].children=[];
  const patch=diff(before,removed)!;assert.deepEqual(advanceSnapshot(before,removed,patch).nodes,removed.nodes);
 });
+
+test('direct comparison ignores property order but detects nested styles, media and removals',()=>{
+ const before=snapshot({...initial,nodes:[{id:'n1',kind:'element',tag:'div',style:{color:'red',display:'block'},pseudoStyles:{before:{content:'"first"'}},children:[],media:{paused:true,currentTime:0,volume:1,muted:false,loop:false,playbackRate:1}}]},'nested');
+ const reordered=structuredClone(before);reordered.nodes[0].style={display:'block',color:'red'};assert.equal(diff(before,reordered),null);
+ for(const mutate of [(n:typeof before.nodes[0])=>{n.style!.color='blue';},(n:typeof before.nodes[0])=>{delete n.style!.color;},(n:typeof before.nodes[0])=>{n.pseudoStyles!.before!.content='"second"';},(n:typeof before.nodes[0])=>{n.media!.paused=false;},(n:typeof before.nodes[0])=>{n.children!.push('n2');}]){
+  const next=structuredClone(before);mutate(next.nodes[0]);assert.equal(diff(before,next)!.upsert.length,1);
+ }
+ const next=structuredClone(before);next.focused='n1';assert.deepEqual(diff(before,next)!.upsert,[]);
+});

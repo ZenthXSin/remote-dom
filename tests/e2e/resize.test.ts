@@ -22,7 +22,7 @@ test('page zoom, window expansion and viewport resize update remote layout',{tim
  await page.getByRole('button',{name:'恢复 100%',exact:true}).click();await layout(1);
  await page.getByRole('button',{name:'放大窗口',exact:true}).click();await layout(1);
  assert.ok(await page.locator('#mirror').evaluate(node=>(node as HTMLElement).clientWidth)>1400);
- await page.getByRole('button',{name:'恢复窗口',exact:true}).click();await layout(1);
+ await page.locator('#floating-ball').click();await page.getByRole('button',{name:'退出全屏',exact:true}).click();await layout(1);
  await page.setViewportSize({width:1000,height:800});await layout(1);
  await page.getByRole('button',{name:'缩小页面',exact:true}).click();await layout(.75);
  assert.equal(await frame.evaluate(()=>document.getElementById('mirror-root')!.style.getPropertyValue('zoom')),'0.75');

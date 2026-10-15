@@ -28,3 +28,17 @@
 在仓库根目录执行 npm ci、npm run build。使用 esbuild 将 scripts/benchmark-memory.ts 打包为 Node ESM（packages=external），然后复制到专用的引擎测试容器中运行。该容器需包含 dist、生产依赖和可运行沙箱的 Chromium；以非 root 用户运行，并加载 deploy/chromium-seccomp.json。脚本只打开内置测试页面，不访问用户账户或外部网站。
 
 优化版 Node 参数为 --max-old-space-size=128 --max-semi-space-size=2；基线使用优化前源码和默认 Node 参数。不要在共享应用容器或宿主机直接比较 cgroup 总内存，它会包含同一 cgroup 中其他进程的开销。完整样例采样脚本位于 scripts/benchmark-memory.ts。
+
+
+## 交互与处理延迟优化（0.8.1）
+
+- 连续滚动改为每 45 ms 合并发送最新位置，不再等滚动停止。多个滚动区域分别记录；点击和拖拽前先提交待发送的滚动，避免远端位置滞后。
+- 页面差分直接比较结构，减少完整节点 JSON 字符串的分配。
+- 图片、媒体及 CSS 资源从专用字段查找，不再扫描整段正文和输入内容。
+- 手动缩放倍率同步到渲染页面，修复缩放后拖拽位置不准。适配屏幕会恢复 100%，并修改远端视口大小。
+
+2000 个节点、每个节点 30 个样式字段的合成微基准，5 轮、每轮 30 次，中位数：差分由 13.59 ms 降至 8.68 ms，资源查找由 7.79 ms 降至 0.77 ms。见 [原始数据](responsiveness-benchmark.json)。这不是整站端到端延迟，真实效果取决于网页、客户端和网络。
+
+可用 `node --expose-gc --import tsx scripts/benchmark-responsiveness.ts` 重现。脚本包含上一版对照算法，并校验两种算法在该负载下的输出一致。
+
+连续滚动回归测试在旧版失败，新版约 109–115 ms 观察到两个远端滚动区域开始同步。内存复测：简单页面中位数 256 MiB，动态页面 298.5 MiB，本轮未观察到常驻内存进一步显著下降，200 MB 目标仍未达成。

@@ -2,6 +2,7 @@ import {initShell} from '../ui/shell.js';
 initShell();
 import type {Snapshot,Patch,UserEvent} from '../shared/protocol.js';
 import {AssetLoader} from './assets.js';
+import {collectNodeAssets} from '../shared/assets.js';
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const stage=$('mirror-stage');
 const frame=$<HTMLIFrameElement>('mirror');const address=$<HTMLInputElement>('address');
@@ -96,9 +97,9 @@ function viewportSize(){return {width:Math.max(160,Math.round(stage.clientWidth/
 function applyMirrorScale(){
  frame.style.width='100%';frame.style.height='100%';frame.style.transformOrigin='';frame.style.transform='';frame.style.left='';frame.style.top='';
 }
-function setZoom(scale:number){zoom=Math.max(.1,Math.min(4,scale));$('zoom-level').textContent=`${Math.round(zoom*100)}%`;applyMirrorScale();resize();}
+function setZoom(scale:number){zoom=Math.max(.1,Math.min(4,scale));$('zoom-level').textContent=`${Math.round(zoom*100)}%`;applyMirrorScale();void ready.then(()=>port.postMessage({type:'zoom',scale:zoom}));resize();}
 $('fit-screen').addEventListener('click',()=>{
-  zoom=1;$('zoom-level').textContent='100%';lastViewport='';
+  setZoom(1);lastViewport='';
   requestAnimationFrame(()=>requestAnimationFrame(()=>{lastViewport='';resize();}));
 });
 $('zoom-out').addEventListener('click',()=>setZoom(zoom-.25));
@@ -120,7 +121,7 @@ frame.addEventListener('load',()=>{
     if(message.type==='open-find'){openFind();return;}
     if(message.type==='focus-address'){address.focus();address.select();return;}
     if(message.type==='find-result'){$('find-count').textContent=message.total?`${message.index} / ${message.total}`:'没有匹配';return;}
-    if(message.type==='ready'){readyResolve();return;}
+    if(message.type==='ready'){port.postMessage({type:'zoom',scale:zoom});readyResolve();return;}
     if(message.type==='resync'){resync();return;}
     if(message.type==='rendered'){$('nodes').textContent=String(message.nodeCount);$('revision').textContent=String(message.seq);return;}
     if(message.type==='event'){
@@ -132,7 +133,7 @@ frame.addEventListener('load',()=>{
 frame.src='/mirror';
 function prepareAssets(message:Snapshot|Patch){
   const nodes=message.type==='snapshot'?message.nodes:message.upsert;
-  const text=JSON.stringify([message.fontFaces??[],nodes]);assetLoader.enqueue([...new Set(Array.from(text.matchAll(/asset:([a-f0-9-]+)/g),match=>match[1]))]);
+  const ids=collectNodeAssets(nodes);for(const font of message.fontFaces??[]){const match=/^asset:([a-f0-9-]{36})$/.exec(font.assetUrl);if(match)ids.add(match[1]);}assetLoader.enqueue([...ids]);
 }
 function receive(message:any,id:string,localGeneration:number){
   if(localGeneration!==generation)return;

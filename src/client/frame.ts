@@ -1,5 +1,6 @@
 import {STYLE_DEFAULTS,SAFE_TAGS,SAFE_ATTRS,SVG_TAGS,SVG_ATTRS,STYLE_PROPERTIES,type MirrorNode,type Snapshot,type Patch,type UserEvent} from '../shared/protocol.js';
 import {MirrorRules} from './rules.js';
+import {collectNodeAssets} from '../shared/assets.js';
 const mount=document.getElementById('mirror-root')!;
 const nodes=new Map<string,Node>();const reverse=new WeakMap<Node,string>();
 const records=new Map<string,MirrorNode>();const assets=new Map<string,string>();
@@ -44,13 +45,14 @@ function ownsScroll(key:string,x:number,y:number){
   if(Math.abs(intent.x-x)<2&&Math.abs(intent.y-y)<2&&performance.now()-intent.at>160){scrollIntents.delete(key);return false;}
   return true;
 }
-function reset(clearAssets=false){clearTimeout(inputTimer);clearTimeout(hoverTimer);if(assetPaint!==undefined)cancelAnimationFrame(assetPaint);assetPaint=undefined;pendingAssets.clear();assetNodes.clear();nodeAssets.clear();mirrorRules.clear();for(const face of fontFaces.values())document.fonts.delete(face);fontFaces.clear();currentFonts=[];pendingInput=undefined;pendingHover=undefined;lastHover=undefined;hoverWaiting=0;pointerGesture=undefined;pointerPending=undefined;pointerWaiting=0;composing=false;mount.replaceChildren();nodes.clear();records.clear();dirty.clear();inputAcks.clear();inputRevision=-1;currentRoot='';editableIntents.clear();scrollIntents.clear();expectedScrolls.clear();epoch='';seq=-1;if(clearAssets){for(const url of assets.values())URL.revokeObjectURL(url);assets.clear();}}
+function reset(clearAssets=false){clearTimeout(scrollTimer);scrollTimer=undefined;pendingScrolls.clear();clearTimeout(inputTimer);clearTimeout(hoverTimer);if(assetPaint!==undefined)cancelAnimationFrame(assetPaint);assetPaint=undefined;pendingAssets.clear();assetNodes.clear();nodeAssets.clear();mirrorRules.clear();for(const face of fontFaces.values())document.fonts.delete(face);fontFaces.clear();currentFonts=[];pendingInput=undefined;pendingHover=undefined;lastHover=undefined;hoverWaiting=0;pointerGesture=undefined;pointerPending=undefined;pointerWaiting=0;composing=false;mount.replaceChildren();nodes.clear();records.clear();dirty.clear();inputAcks.clear();inputRevision=-1;currentRoot='';editableIntents.clear();scrollIntents.clear();expectedScrolls.clear();epoch='';seq=-1;if(clearAssets){for(const url of assets.values())URL.revokeObjectURL(url);assets.clear();}}
 function emit(event:Omit<UserEvent,'type'|'epoch'|'eventId'>){if(!epoch)return 0;const id=++eventId;port.postMessage({type:'event',epoch,eventId:id,...event});return id;}
 function retireInputs(){const released:string[]=[];for(const [id,sent]of dirty){const revision=inputAcks.get(sent);if(revision!==undefined&&inputRevision>=revision){dirty.delete(id);editableIntents.delete(id);inputAcks.delete(sent);released.push(id);}}const pending=new Set(dirty.values());for(const event of inputAcks.keys())if(!pending.has(event))inputAcks.delete(event);return released;}
 function idFor(target:EventTarget|null){let n=target as Node|null;while(n&&!reverse.has(n))n=n.parentNode;return n?reverse.get(n):undefined;}
 function pointerNode(target:EventTarget|null){let node=target instanceof Node?target:undefined;while(node){if(node instanceof Element&&reverse.has(node)){const rect=node.getBoundingClientRect();if(rect.width>0&&rect.height>0)return {nodeId:reverse.get(node)!,rect};}node=node.parentNode??undefined;}return;}
 function editableTarget(target:EventTarget|null){return target instanceof HTMLElement?target.closest<HTMLElement>('[contenteditable="plaintext-only"]')??undefined:undefined;}
 function input(){
+  flushScroll();
   clearTimeout(inputTimer);const target=pendingInput;pendingInput=undefined;if(!target)return;
   const id=reverse.get(target);if(!id)return;
   let value:string,start:number|undefined,end:number|undefined;
@@ -71,7 +73,7 @@ function resolveValue(value:string){
 }
 function unindexAssets(id:string){for(const asset of nodeAssets.get(id)??[]){const users=assetNodes.get(asset);users?.delete(id);if(!users?.size)assetNodes.delete(asset);}nodeAssets.delete(id);}
 function indexRecord(record:MirrorNode){
-  unindexAssets(record.id);const ids=[...new Set(Array.from(JSON.stringify(record).matchAll(/asset:([a-f0-9-]+)/g),match=>match[1]))];
+  unindexAssets(record.id);const ids=[...collectNodeAssets([record])];
   if(ids.length)nodeAssets.set(record.id,ids);for(const id of ids){let users=assetNodes.get(id);if(!users){users=new Set();assetNodes.set(id,users);}users.add(record.id);}
 }
 function syncFonts(fonts:NonNullable<Snapshot['fontFaces']>){
@@ -234,14 +236,21 @@ document.addEventListener('keydown',event=>{
   if(mandatory||command||event.altKey||!editing)event.preventDefault();input();emit({action:'key',nodeId:idFor(event.target),key:event.key,shift:event.shiftKey,ctrl:event.ctrlKey,alt:event.altKey,meta:event.metaKey});
 });
 let scrollTimer:ReturnType<typeof setTimeout>|undefined;
+const pendingScrolls=new Map<string,{nodeId?:string;x:number;y:number}>();
+function flushScroll(){
+  clearTimeout(scrollTimer);scrollTimer=undefined;
+  for(const scroll of pendingScrolls.values())emit({action:'scroll',...scroll});
+  pendingScrolls.clear();
+}
 for(const event of ['wheel','touchstart','touchmove','touchend'])document.addEventListener(event,()=>{gestureUntil=performance.now()+300;},{passive:true,capture:true});
 document.addEventListener('scroll',event=>{
-  clearTimeout(scrollTimer);const node=event.target instanceof HTMLElement?event.target:undefined;
+  const node=event.target instanceof HTMLElement?event.target:undefined;
   const x=node?.scrollLeft??window.scrollX,y=node?.scrollTop??window.scrollY;
   const key=scrollKey(node);const expected=expectedScrolls.get(key);
   if(expected&&performance.now()-expected.at<700&&Math.abs(expected.x-x)<2&&Math.abs(expected.y-y)<2){expectedScrolls.delete(key);return;}
   scrollIntents.set(key,{x,y,at:performance.now()});
-  scrollTimer=setTimeout(()=>{const intent=scrollIntents.get(key);if(intent)emit({action:'scroll',nodeId:node?reverse.get(node):undefined,x:node?intent.x:intent.x/zoom,y:node?intent.y:intent.y/zoom});},45);
+  pendingScrolls.set(key,{nodeId:node?reverse.get(node):undefined,x:node?x:x/zoom,y:node?y:y/zoom});
+  if(!scrollTimer)scrollTimer=setTimeout(flushScroll,45);
 },true);
 
 for(const kind of ['play','pause','seeking','volumechange','ratechange'])document.addEventListener(kind,event=>{
