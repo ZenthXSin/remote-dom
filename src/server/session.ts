@@ -21,6 +21,7 @@ import {ASSET_MIMES,MAX_ASSET_BYTES,fetchAsset,type AssetBody,type AssetSource} 
 export class RemoteSession {
   readonly id=randomUUID(); readonly created=Date.now(); lastActivity=Date.now();
   browser!:Browser; context!:BrowserContext; page!:Page; cdp!:CDPSession;
+  private renderFlow=new WeakMap<WebSocket,{enabled:boolean;waiting?:{epoch:string;seq:number}}>();
   sockets=new Set<WebSocket>(); assets=new Map<string,AssetSource>();
   private assetByUrl=new Map<string,string>(); private assetRevision=0;private inlineTransit=new AssetTransit();private inlineIds:string[]=[];private assetLoads=new Map<string,Promise<AssetBody>>();
   private fontRules=new Map<string,RemoteFont[]>();
@@ -168,7 +169,7 @@ export class RemoteSession {
     }
   }
   attach(socket:WebSocket) {
-    monitorSocket(socket);
+    monitorSocket(socket);this.renderFlow.set(socket,{enabled:false});
     this.view();
     this.lastActivity=Date.now();this.sockets.add(socket);const peer=randomUUID();this.events.set(peer,0);
     if(this.current)this.send(socket,this.current);
@@ -176,7 +177,19 @@ export class RemoteSession {
     socket.on('close',()=>{this.sockets.delete(socket);this.events.delete(peer);});
     socket.on('message',data=>{
       let message:unknown;try{message=JSON.parse(data.toString());}catch{return socket.close(1008,'Invalid JSON');}
-      if((message as {type?:string})?.type==='resync'){if(this.current)this.send(socket,this.current);return;}
+      if((message as {type?:string})?.type==='render-flow'){this.renderFlow.get(socket)!.enabled=true;return;}
+      if((message as {type?:string})?.type==='rendered'){
+        const flow=this.renderFlow.get(socket)!,ack=message as {epoch?:string;seq?:number};
+        if(flow.enabled&&flow.waiting&&ack.epoch===flow.waiting.epoch&&ack.seq===flow.waiting.seq){
+          flow.waiting=undefined;
+          if(this.current&&(this.current.epoch!==ack.epoch||this.current.seq!==ack.seq)){
+            const previous=this.history.get(ack.seq!);
+            const patch=ack.epoch===this.current.epoch&&previous?.epoch===this.current.epoch?diff(previous,this.current):undefined;
+            this.send(socket,patch?{...patch,seq:this.current.seq}:this.current);
+          }
+        }return;
+      }
+      if((message as {type?:string})?.type==='resync'){this.renderFlow.get(socket)!.waiting=undefined;if(this.current)this.send(socket,this.current);return;}
       if((message as {type?:string})?.type==='ping'){this.lastActivity=Date.now();this.send(socket,{type:'pong'});return;}
       void this.submit(message as UserEvent,peer).then(response=>this.send(socket,response));
     });
@@ -337,7 +350,9 @@ export class RemoteSession {
     else if(action==='forward')await this.page.goForward({waitUntil:'domcontentloaded'});
     else await this.page.reload({waitUntil:'domcontentloaded'});
   }
-  send(socket:WebSocket,message:ServerMessage){if(socket.readyState===WebSocket.OPEN){if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
+  send(socket:WebSocket,message:ServerMessage){if(socket.readyState===WebSocket.OPEN){
+    const flow=this.renderFlow.get(socket);if(flow&&(message.type==='snapshot'||message.type==='patch')){if(flow.enabled&&flow.waiting)return;flow.waiting={epoch:message.epoch,seq:message.seq};}
+    if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
   summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,persistenceError:this.persistenceError||undefined};}
   async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}

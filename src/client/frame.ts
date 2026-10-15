@@ -7,7 +7,10 @@ const records=new Map<string,MirrorNode>();const assets=new Map<string,string>()
 const properties=new Set<string>(STYLE_PROPERTIES);
 const dirty=new Map<string,number>();let port:MessagePort;let epoch='';let seq=-1;let eventId=0;
 const inputAcks=new Map<number,number>();let inputRevision=-1;let currentRoot='';
-let applying=false,composing=false;let inputTimer:ReturnType<typeof setTimeout>|undefined;
+let applying=false,composing=false;let renderWork=Promise.resolve();
+function scheduleWork(work:()=>void|Promise<void>){renderWork=renderWork.then(work).catch(()=>port.postMessage({type:'resync'}));}
+function yieldToBrowser(){return new Promise<void>(resolve=>setTimeout(resolve,0));}
+let inputTimer:ReturnType<typeof setTimeout>|undefined;
 let pendingInput:HTMLElement|undefined;
 const editableIntents=new Map<string,{value:string;at:number;eventId:number}>();
 const fontFaces=new Map<string,FontFace>();
@@ -91,12 +94,13 @@ function releaseUnusedAssets(){
   for(const [id,url]of assets)if(!assetNodes.has(id)&&!fonts.has(id)){URL.revokeObjectURL(url);assets.delete(id);pendingAssets.delete(id);released.push(id);}
   if(released.length)port.postMessage({type:'release-assets',ids:released});
 }
-function paintAssets(){
+async function paintAssets(){
   assetPaint=undefined;const affected=new Set<string>();for(const id of pendingAssets)for(const node of assetNodes.get(id)??[])affected.add(node);pendingAssets.clear();
-  syncFonts(currentFonts);const changed=[...affected].flatMap(id=>{const record=records.get(id);return record?[record]:[];});if(changed.length&&currentRoot)applyRecords(changed,[],currentRoot);releaseUnusedAssets();
+  syncFonts(currentFonts);const changed=[...affected].flatMap(id=>{const record=records.get(id);return record?[record]:[];});if(changed.length&&currentRoot)await applyRecords(changed,[],currentRoot);releaseUnusedAssets();
 }
-function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
-  applying=true;
+async function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
+  applying=true;let sliceStart=performance.now();
+  const checkpoint=async()=>{await yieldToBrowser();sliceStart=performance.now();};
   try{
     for(const record of upserts){records.set(record.id,record);indexRecord(record);}
     const protectedNodes=new Set<string>();
@@ -108,6 +112,7 @@ function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
     if(activeId&&(composing||dirty.has(activeId)))protect(activeId);
     for(const id of remove){const node=nodes.get(id);if(!(activeId&&protectedNodes.has(activeId)&&node&&active?.contains(node)))node?.parentNode?.removeChild(node);nodes.delete(id);records.delete(id);dirty.delete(id);unindexAssets(id);mirrorRules.remove(id);}
     for(const record of upserts){
+      if(performance.now()-sliceStart>8)await checkpoint();
       let node=nodes.get(record.id);let replaced:Node|undefined;
       const tag=record.namespace==='svg'&&SVG_TAGS.has(record.tag??'')?record.tag:SAFE_TAGS.has(record.tag??'')?record.tag:'div';
       if(node&&(record.kind==='text'?node.nodeType!==Node.TEXT_NODE:!(node instanceof Element)||node.localName!==tag||(record.namespace==='svg')!==(node.namespaceURI==='http://www.w3.org/2000/svg'))){replaced=node;reverse.delete(node);nodes.delete(record.id);node=undefined;}
@@ -143,9 +148,9 @@ function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
       if(node instanceof HTMLInputElement||node instanceof HTMLTextAreaElement){if(record.value!==undefined&&!dirty.has(record.id)&&node.value!==record.value)node.value=record.value;if(node instanceof HTMLInputElement&&record.checked!==undefined)node.checked=record.checked;}
     }
     // Place nodes after creating the entire batch; this supports moves and forward references.
-    for(const record of upserts){const node=nodes.get(record.id);if(record.kind!=='element'||!node||protectedNodes.has(record.id))continue;const wanted=(record.children??[]).map(id=>nodes.get(id)).filter((n):n is Node=>!!n);for(let i=0;i<wanted.length;i++)if(node.childNodes[i]!==wanted[i])node.insertBefore(wanted[i],node.childNodes[i]??null);while(node.childNodes.length>wanted.length)node.removeChild(node.lastChild!);}
+    for(const record of upserts){if(performance.now()-sliceStart>8)await checkpoint();const node=nodes.get(record.id);if(record.kind!=='element'||!node||protectedNodes.has(record.id))continue;const wanted=(record.children??[]).map(id=>nodes.get(id)).filter((n):n is Node=>!!n);for(let i=0;i<wanted.length;i++)if(node.childNodes[i]!==wanted[i])node.insertBefore(wanted[i],node.childNodes[i]??null);while(node.childNodes.length>wanted.length)node.removeChild(node.lastChild!);}
     const rootNode=nodes.get(root);if(rootNode&&mount.firstChild!==rootNode)mount.replaceChildren(rootNode);
-    for(const record of upserts)mirrorRules.sync(record,assetVersion);
+    for(const record of upserts){if(performance.now()-sliceStart>8)await checkpoint();mirrorRules.sync(record,assetVersion);}
     for(const [id,record]of records){if(!record.topLayer)continue;const node=nodes.get(id);if(!(node instanceof HTMLElement)||!node.isConnected)continue;
       try{if(record.topLayer==='modal'&&node instanceof HTMLDialogElement&&!node.matches(':modal')){node.removeAttribute('open');node.showModal();}else if(record.topLayer==='popover'&&!node.matches(':popover-open'))node.showPopover();}catch{}
     }
@@ -155,49 +160,48 @@ function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
     }if(node instanceof HTMLSelectElement&&record.selectedIndex!==undefined&&!dirty.has(record.id))node.selectedIndex=record.selectedIndex;}
   }finally{requestAnimationFrame(()=>{applying=false;});}
 }
-function update(message:Snapshot|Patch){
+async function update(message:(Snapshot|Patch)&{renderToken?:number}){
   bodyScrollsWindow=message.bodyScrollsWindow===true;
   for(const key of ['overflow-x','overflow-y','direction','writing-mode','color-scheme']){const value=message.viewportStyle?.[key];if(value!==undefined)document.documentElement.style.setProperty(key,value);else document.documentElement.style.removeProperty(key);}
   document.documentElement.lang=message.language??'';
   if(message.type==='snapshot'){
     const sameDocument=message.epoch===epoch;
-    if(sameDocument&&message.seq<seq)return;
+    if(sameDocument&&message.seq<seq){port.postMessage({type:'rendered',epoch,seq,nodeCount:nodes.size,renderToken:message.renderToken});return;}
     const present=new Set(message.nodes.map(n=>n.id));
     const remove=sameDocument?[...nodes.keys()].filter(id=>!present.has(id)):[];
     if(!sameDocument)reset();
     currentRoot=message.root;inputRevision=message.inputRevision??-1;retireInputs();
-    epoch=message.epoch;seq=message.seq;applyRecords(message.nodes,remove,message.root);
+    epoch=message.epoch;seq=message.seq;await applyRecords(message.nodes,remove,message.root);
   }
-  else {if(message.epoch!==epoch||message.base!==seq){port.postMessage({type:'resync'});return;}inputRevision=message.inputRevision??-1;const released=retireInputs();seq=message.seq;const changed=new Map(message.upsert.map(n=>[n.id,n]));for(const id of released){const add=(id:string)=>{const record=changed.get(id)??records.get(id);if(record){changed.set(id,record);for(const child of record.children??[])add(child);}};add(id);}applyRecords([...changed.values()],message.remove,message.root);}
+  else {if(message.epoch!==epoch||message.base!==seq){port.postMessage({type:'resync'});return;}inputRevision=message.inputRevision??-1;const released=retireInputs();seq=message.seq;const changed=new Map(message.upsert.map(n=>[n.id,n]));for(const id of released){const add=(id:string)=>{const record=changed.get(id)??records.get(id);if(record){changed.set(id,record);for(const child of record.children??[])add(child);}};add(id);}await applyRecords([...changed.values()],message.remove,message.root);}
   syncFonts(message.fontFaces??[]);releaseUnusedAssets();
   if(document.hasFocus()&&!dirty.size&&message.focused){const node=nodes.get(message.focused);if(node instanceof HTMLElement&&document.activeElement!==node)node.focus({preventScroll:true});}
   if(document.hasFocus()&&message.focused&&!dirty.has(message.focused)&&!composing){const record=records.get(message.focused),node=nodes.get(message.focused);if(record?.selectionStart!==undefined&&record.selectionEnd!==undefined){try{if(node instanceof HTMLInputElement||node instanceof HTMLTextAreaElement)node.setSelectionRange(record.selectionStart,record.selectionEnd);else if(node instanceof HTMLElement&&node.isContentEditable){const walk=document.createTreeWalker(node,NodeFilter.SHOW_TEXT);const text:Node[]=[];while(walk.nextNode())text.push(walk.currentNode);const position=(offset:number):[Node,number]=>{for(const item of text){if(offset<=(item.textContent?.length??0))return [item,offset];offset-=item.textContent?.length??0;}return [node,node.childNodes.length];};const range=document.createRange();range.setStart(...position(record.selectionStart));range.setEnd(...position(record.selectionEnd));const selection=getSelection();selection?.removeAllRanges();selection?.addRange(range);}}catch{}}}
   const x=message.scrollX*zoom,y=message.scrollY*zoom;
   if(!ownsScroll('window',x,y)&&(Math.abs(window.scrollY-y)>2||Math.abs(window.scrollX-x)>2)){expectedScrolls.set('window',{x,y,at:performance.now()});window.scrollTo(x,y);}
-  port.postMessage({type:'rendered',epoch,seq,nodeCount:nodes.size});
+  port.postMessage({type:'rendered',epoch,seq,nodeCount:nodes.size,renderToken:message.renderToken});
 }
 window.addEventListener('message',event=>{
   if(event.source!==parent||event.data?.type!=='initialize'||!event.ports[0]||port)return;
-  port=event.ports[0];port.onmessage=event=>{
-    const message=event.data;
+  port=event.ports[0];port.onmessage=event=>{const message=event.data;scheduleWork(async()=>{
     if(message.type==='find'){findText(String(message.query??''),Number(message.direction)||0);return;}
     if(message.type==='zoom'){
       const next=Math.max(.1,Math.min(4,Number(message.scale)||1));
       const x=scrollX/zoom*next,y=scrollY/zoom*next;zoom=next;mount.style.setProperty('zoom',String(zoom));mount.style.minHeight=`${100/zoom}vh`;
       gestureUntil=performance.now()+300;scrollIntents.set('window',{x,y,at:performance.now()});window.scrollTo(x,y);return;
     }
-    if(message.type==='asset'){if(assets.has(message.id))return;assets.set(message.id,URL.createObjectURL(new Blob([message.bytes],{type:message.mime})));assetVersion++;pendingAssets.add(message.id);if(assetPaint===undefined)assetPaint=requestAnimationFrame(paintAssets);return;}
-    if(message.type==='snapshot'||message.type==='patch')update(message);
+    if(message.type==='asset'){if(assets.has(message.id))return;assets.set(message.id,URL.createObjectURL(new Blob([message.bytes],{type:message.mime})));assetVersion++;pendingAssets.add(message.id);if(assetPaint===undefined)assetPaint=requestAnimationFrame(()=>scheduleWork(paintAssets));return;}
+    if(message.type==='snapshot'||message.type==='patch')await update(message);
     if(message.type==='reset')reset(true);
     if(message.type==='ack'||message.type==='error'){
       if(message.type==='error')lastHover=undefined;
       if(pointerWaiting===message.eventId){pointerWaiting=0;sendPointerMove();}
       if(hoverWaiting===message.eventId){hoverWaiting=0;clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}
-      if(message.type==='ack'&&message.inputRevision!==undefined){if([...dirty.values()].includes(message.eventId))inputAcks.set(message.eventId,message.inputRevision);const released=retireInputs();const changed=new Map<string,MirrorNode>();const add=(id:string)=>{const record=records.get(id);if(record&&!changed.has(id)){changed.set(id,record);for(const child of record.children??[])add(child);}};for(const id of released)add(id);if(changed.size)applyRecords([...changed.values()],[],currentRoot);}
+      if(message.type==='ack'&&message.inputRevision!==undefined){if([...dirty.values()].includes(message.eventId))inputAcks.set(message.eventId,message.inputRevision);const released=retireInputs();const changed=new Map<string,MirrorNode>();const add=(id:string)=>{const record=records.get(id);if(record&&!changed.has(id)){changed.set(id,record);for(const child of record.children??[])add(child);}};for(const id of released)add(id);if(changed.size)await applyRecords([...changed.values()],[],currentRoot);}
       else for(const [id,sent]of dirty)if(sent===message.eventId&&!editableIntents.has(id))dirty.delete(id);
       if(message.type==='error')for(const [id,intent]of editableIntents)if(intent.eventId===message.eventId){editableIntents.delete(id);dirty.delete(id);port.postMessage({type:'resync'});}
     }
-  };
+  });};
   port.start();port.postMessage({type:'ready'});
 });
 document.addEventListener('click',event=>{

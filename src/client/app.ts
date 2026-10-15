@@ -1,6 +1,7 @@
 import {initShell} from '../ui/shell.js';
 initShell();
 import type {Snapshot,Patch,UserEvent} from '../shared/protocol.js';
+import {RenderQueue} from './render-queue.js';
 import {AssetLoader} from './assets.js';
 import {collectNodeAssets} from '../shared/assets.js';
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
@@ -13,6 +14,7 @@ const assetLoader=new AssetLoader((id,mime,bytes)=>port.postMessage({type:'asset
   $('resource-state').textContent=pending?`图片和字体加载中（${pending}）`:failed?`${failed} 项图片或字体未加载`:'';
   $('resource-state').hidden=!pending&&!failed;$('retry-assets').hidden=!failed;
 });
+const renders=new RenderQueue((message,renderToken)=>{port.postMessage({...message,renderToken});prepareAssets(message);},resync);
 $('retry-assets').addEventListener('click',()=>assetLoader.retry());
 let fixtureUrl='';let preferredUrl='';let heartbeat:ReturnType<typeof setInterval>|undefined;
 let transport='websocket';let httpFallback=false;let connected=false;let httpEpoch='';let httpSeq=-1;let socketTimeout:ReturnType<typeof setTimeout>|undefined;
@@ -122,9 +124,9 @@ frame.addEventListener('load',()=>{
     if(message.type==='focus-address'){address.focus();address.select();return;}
     if(message.type==='find-result'){$('find-count').textContent=message.total?`${message.index} / ${message.total}`:'没有匹配';return;}
     if(message.type==='ready'){port.postMessage({type:'zoom',scale:zoom});readyResolve();return;}
-    if(message.type==='resync'){resync();return;}
+    if(message.type==='resync'){renders.reset();resync();return;}
     if(message.type==='release-assets'){assetLoader.forget(message.ids);return;}
-    if(message.type==='rendered'){$('nodes').textContent=String(message.nodeCount);$('revision').textContent=String(message.seq);return;}
+    if(message.type==='rendered'){if(renders.done(message.renderToken)&&transport!=='http'&&socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({type:'rendered',epoch:message.epoch,seq:message.seq}));$('nodes').textContent=String(message.nodeCount);$('revision').textContent=String(message.seq);return;}
     if(message.type==='event'){
       if(connected){const input=message as UserEvent;const remoteId=nextEventId();sentAt.set(remoteId,{time:performance.now(),frameId:input.eventId,action:input.action});operationFeedback();sendEvent({...input,eventId:remoteId});}
       else{port.postMessage({type:'error',eventId:message.eventId});notice('连接尚未恢复，请重新操作',true);}
@@ -156,12 +158,12 @@ function receive(message:any,id:string,localGeneration:number){
     httpEpoch=message.epoch;httpSeq=message.seq;
   }
   queue=queue.then(async()=>{
-    if(localGeneration!==generation)return;await ready;
+    if(localGeneration!==generation)return;await ready;if(localGeneration!==generation)return;
       pendingFilePicker=message.filePicker;pickerSession=id;pickerEpoch=message.epoch;$('file-panel').hidden=!pendingFilePicker;
       const files=message.downloads??[];const downloads=$('downloads');
       if(downloads.dataset.state!==JSON.stringify(files)){downloads.dataset.state=JSON.stringify(files);downloads.replaceChildren();for(const file of files){const link=document.createElement('a');link.href=`/api/sessions/${id}/downloads/${file.id}`;link.textContent=`下载 ${file.name}`;link.className='secondary';link.setAttribute('download',file.name);downloads.append(link);}}
       epoch=message.epoch;const windows=message.windows??[];mainWindowId=windows[0]?.id??'';inChildWindow=windows.length>1&&!windows[0].active;viewBack.textContent=inChildWindow?'← 返回主窗口':'← 返回';viewBack.disabled=false;$('window-strip').hidden=windows.length<2;const select=$<HTMLSelectElement>('windows');if(JSON.stringify(windows)!==select.dataset.state){select.dataset.state=JSON.stringify(windows);select.replaceChildren();for(const window of windows){const option=document.createElement('option');option.value=window.id;option.textContent=window.title;option.selected=window.active;select.append(option);}}
-      port.postMessage(message);prepareAssets(message);persistenceNotice(message.persistenceError);if(document.activeElement!==address)address.value=message.url;$('page-title').textContent=message.title||'无标题';
+      renders.push(message);persistenceNotice(message.persistenceError);if(document.activeElement!==address)address.value=message.url;$('page-title').textContent=message.title||'无标题';
       $('capabilities').textContent=message.unsupported?.length?`页面含暂不支持的能力：${message.unsupported.join('、')}`:message.truncated?'页面达到节点数量上限':'目标脚本在远端执行 · 本地不接收目标 Cookie';
       if(message.type==='snapshot')resize();
 
@@ -171,13 +173,18 @@ function online(){connected=true;frame.inert=false;notice(uncertainInput?'最近
 function offline(){connected=false;frame.inert=true;$('connection').textContent='已断开';$('connection').className='';notice('连接中断，正在重新同步…');}
 function resync(){httpEpoch='';httpSeq=-1;if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({type:'resync'}));}
 function sendEvent(event:UserEvent){
-  if(transport!=='http'){socket?.send(JSON.stringify(event));return;}
   const last=pendingEvents.at(-1);
-  if(last&&['input','hover','scroll','viewport'].includes(event.action)&&last.action===event.action&&last.nodeId===event.nodeId){pendingEvents.pop();const sent=sentAt.get(last.eventId);if(sent?.frameId!==undefined)port.postMessage({type:'ack',eventId:sent.frameId});sentAt.delete(last.eventId);operationFeedback();}
-  pendingEvents.push(event);if(!writeBusy&&!eventTimer)eventTimer=setTimeout(()=>{eventTimer=undefined;void flushEvents();},8);
+  if(last&&last.epoch===event.epoch&&(transport==='http'?['input','hover','scroll','viewport']:['hover','scroll','viewport']).includes(event.action)&&last.action===event.action&&last.nodeId===event.nodeId){pendingEvents.pop();const sent=sentAt.get(last.eventId);if(sent?.frameId!==undefined)port.postMessage({type:'ack',eventId:sent.frameId});sentAt.delete(last.eventId);operationFeedback();}
+  pendingEvents.push(event);
+  if(transport!=='http'&&!['hover','scroll','viewport'].includes(event.action)){clearTimeout(eventTimer);eventTimer=undefined;void flushEvents();return;}
+  if(!writeBusy&&!eventTimer)eventTimer=setTimeout(()=>{eventTimer=undefined;void flushEvents();},8);
 }
 async function flushEvents(){
   if(writeBusy||!pendingEvents.length||!activeId)return;
+  if(transport!=='http'){
+    if(socket?.readyState!==WebSocket.OPEN||socket.bufferedAmount>256*1024){socket?.close();return;}
+    for(const event of pendingEvents.splice(0))socket.send(JSON.stringify(event));return;
+  }
   const id=activeId,localGeneration=generation,events:UserEvent[]=[];let bytes=0;
   while(pendingEvents.length&&events.length<16){const next=pendingEvents[0];const size=new TextEncoder().encode(JSON.stringify(next)).length;if(events.length&&bytes+size>48000)break;events.push(pendingEvents.shift()!);bytes+=size;}
   writeBusy=true;pollAbort?.abort();clearTimeout(reconnectTimer);
@@ -192,7 +199,7 @@ async function flushEvents(){
   finally{clearTimeout(checkTimer);if(progressTimer===checkTimer)progressTimer=undefined;if(localGeneration===generation){writeBusy=false;if(pendingEvents.length)void flushEvents();else requestPoll?.();}}
 }
 function connect(id:string){
-  clearTimeout(socketTimeout);
+  clearTimeout(socketTimeout);renders.reset();
   for(const sent of sentAt.values())if(sent.frameId!==undefined){port.postMessage({type:'error',eventId:sent.frameId});uncertainInput=true;}sentAt.clear();operationFeedback();$('file-panel').hidden=true;
   pollAbort?.abort();clearTimeout(eventTimer);clearTimeout(progressTimer);eventTimer=undefined;progressTimer=undefined;pendingEvents.length=0;writeBusy=false;requestPoll=undefined;lastViewport='';
   clearTimeout(reconnectTimer);clearInterval(heartbeat);generation++;socket?.close();socket=undefined;activeId=id;closing=false;connected=false;frame.inert=true;
@@ -224,7 +231,7 @@ function connect(id:string){
   const scheme=location.protocol==='https:'?'wss:':'ws:',candidate=new WebSocket(`${scheme}//${location.host}/api/sessions/${id}/stream`);socket=candidate;
   let opened=false,received=false,lastMessage=Date.now(),stalled=false;
   socketTimeout=setTimeout(()=>{if(localGeneration===generation&&candidate.readyState===WebSocket.CONNECTING)candidate.close();},4000);
-  candidate.onopen=()=>{if(localGeneration!==generation){candidate.close();return;}opened=true;lastMessage=Date.now();clearTimeout(socketTimeout);online();heartbeat=setInterval(()=>{if(localGeneration!==generation)return;if(!document.hidden&&Date.now()-lastMessage>45000){stalled=true;candidate.close();return;}if(candidate.readyState===WebSocket.OPEN)candidate.send(JSON.stringify({type:'ping'}));},15000);};
+  candidate.onopen=()=>{if(localGeneration!==generation){candidate.close();return;}opened=true;lastMessage=Date.now();clearTimeout(socketTimeout);candidate.send(JSON.stringify({type:'render-flow'}));online();heartbeat=setInterval(()=>{if(localGeneration!==generation)return;if(!document.hidden&&Date.now()-lastMessage>45000){stalled=true;candidate.close();return;}if(candidate.readyState===WebSocket.OPEN)candidate.send(JSON.stringify({type:'ping'}));},15000);};
   candidate.onmessage=event=>{if(localGeneration!==generation)return;lastMessage=Date.now();try{const message=JSON.parse(event.data);received=true;if(message.type!=='pong')receive(message,id,localGeneration);}catch{candidate.close(1002,'Invalid stream response');}};
   candidate.onclose=()=>{if(localGeneration!==generation)return;clearTimeout(socketTimeout);offline();clearInterval(heartbeat);if(closing||!activeId)return;if(!opened||!received||stalled){httpFallback=true;transport='http';connect(id);}else reconnectTimer=setTimeout(()=>connect(id),1200);};
 }
