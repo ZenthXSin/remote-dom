@@ -6,7 +6,7 @@ import {WebSocket} from 'ws';
 import type {Config} from './config.js';
 import {TargetPolicy} from './policy.js';
 import {sanitizeDocument} from './sanitize.js';
-import {snapshot,diff} from './diff.js';
+import {snapshot,diff,advanceSnapshot} from './diff.js';
 import type {CapturedDocument,Snapshot,UserEvent,ServerMessage,BrowserDialogMessage} from '../shared/protocol.js';
 import type {DeviceProfile} from './device-profile.js';
 import {FrameCapture,type CaptureFrame} from './frame-capture.js';
@@ -50,7 +50,7 @@ export class RemoteSession {
     const proxy=this.config.proxy?{...this.config.proxy,bypass:[this.policy.fixtureOrigin,...this.policy.fixtureAliases].map(origin=>new URL(origin).host).join(',')}:undefined;
     // Explicitly enable Chromium's sandbox. There is no --no-sandbox fallback.
     this.browser=await chromium.launch({executablePath:this.config.chromiumPath,headless:true,chromiumSandbox:true,
-      proxy:this.config.proxy,args:['--disable-quic','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--disable-background-networking',
+      proxy:this.config.proxy,args:['--disable-gpu','--disable-back-forward-cache','--renderer-process-limit=2','--js-flags=--optimize-for-size','--disable-quic','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--disable-background-networking',
         ...(this.config.proxy?[`--host-resolver-rules=${proxyHostResolverRules(this.config.proxy.server,[this.policy.fixtureOrigin,...this.policy.fixtureAliases])}`]:[])]});
     if(this.closed){await this.browser.close();throw new Error('Session cancelled');}
     const p=this.deviceProfile;
@@ -151,7 +151,7 @@ export class RemoteSession {
       }).slice(0,32);
       this.lastError='';
       if(!this.current){this.current=snapshot(document,this.epoch);this.broadcast(this.current);}
-      else {const patch=diff(this.current,document);if(patch){this.history.set(this.current.seq,this.current);while(this.history.size>8)this.history.delete(this.history.keys().next().value!);this.current=snapshot(document,this.epoch,patch.seq);this.broadcast(patch);}}
+      else {const patch=diff(this.current,document);if(patch){this.history.set(this.current.seq,this.current);while(this.history.size>2)this.history.delete(this.history.keys().next().value!);this.current=advanceSnapshot(this.current,document,patch);this.broadcast(patch);}}
     }catch(error){
       if(this.closed)return;
       const message=error instanceof Error&&error.message.includes('快照')?error.message:'页面正在导航或捕获暂不可用';
@@ -308,5 +308,5 @@ export class RemoteSession {
   send(socket:WebSocket,message:ServerMessage){if(socket.readyState===WebSocket.OPEN){if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
   summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,persistenceError:this.persistenceError||undefined};}
-  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();}
+  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
 }

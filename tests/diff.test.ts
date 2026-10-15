@@ -16,3 +16,19 @@ test('diffing a stored snapshot retains patch type and does not copy transport f
  const previous=snapshot(initial,'d',1);const next=structuredClone(initial);next.nodes[1].text='later';
  const patch=diff(previous,snapshot(next,'d',7))!;assert.equal(patch.type,'patch');assert.equal(patch.base,1);assert.equal(patch.seq,2);
 });
+
+test('retained streaming snapshots share unchanged records without modifying history',async()=>{
+ const {advanceSnapshot}=await import('../src/server/diff.js');
+ let before=snapshot(initial,'stream',0);const first=before;
+ for(let i=0;i<30;i++){
+  const next=structuredClone(initial);next.nodes[1].text='chunk '+i;
+  const patch=diff(before,next)!;const after=advanceSnapshot(before,next,patch);
+  assert.strictEqual(after.nodes[0],first.nodes[0]);
+  assert.notStrictEqual(after.nodes[1],before.nodes[1]);
+  assert.equal(before.nodes[1].text,i===0?'first':'chunk '+(i-1));
+  assert.deepEqual(after,snapshot(next,'stream',patch.seq));before=after;
+ }
+ assert.equal(first.nodes[1].text,'first');
+ const removed=structuredClone(initial);removed.nodes.pop();removed.nodes[0].children=[];
+ const patch=diff(before,removed)!;assert.deepEqual(advanceSnapshot(before,removed,patch).nodes,removed.nodes);
+});

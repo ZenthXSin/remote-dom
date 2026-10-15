@@ -12,3 +12,11 @@ export function diff(previous:Snapshot,next:CapturedDocument):Patch|null {
   if(!upsert.length&&!remove.length&&!metadataChanged)return null;
   return {type:'patch',protocol:1,epoch:previous.epoch,base:previous.seq,seq:previous.seq+1,upsert,remove,...state};
 }
+
+// Snapshots are immutable. Share unchanged records across retained revisions so
+// a streaming text update does not retain another full copy of every style map.
+export function advanceSnapshot(previous:Snapshot,document:CapturedDocument,patch:Patch):Snapshot {
+  const changed=new Set(patch.upsert.map(node=>node.id));
+  const old=new Map(previous.nodes.map(node=>[node.id,node]));
+  return snapshot({...document,nodes:document.nodes.map(node=>changed.has(node.id)?node:old.get(node.id)??node)},previous.epoch,patch.seq);
+}

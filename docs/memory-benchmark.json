@@ -1,0 +1,314 @@
+{
+  "baseline": [
+    {
+      "phase": "simple",
+      "samples": [
+        {
+          "workingMiB": 264,
+          "totalMiB": 265,
+          "nodeMiB": 144,
+          "heapMiB": 52
+        },
+        {
+          "workingMiB": 265,
+          "totalMiB": 266,
+          "nodeMiB": 144,
+          "heapMiB": 52
+        },
+        {
+          "workingMiB": 265,
+          "totalMiB": 266,
+          "nodeMiB": 144,
+          "heapMiB": 50
+        },
+        {
+          "workingMiB": 266,
+          "totalMiB": 267,
+          "nodeMiB": 144,
+          "heapMiB": 53
+        },
+        {
+          "workingMiB": 265,
+          "totalMiB": 267,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 264,
+          "totalMiB": 265,
+          "nodeMiB": 144,
+          "heapMiB": 52
+        },
+        {
+          "workingMiB": 265,
+          "totalMiB": 266,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 257,
+          "totalMiB": 259,
+          "nodeMiB": 138,
+          "heapMiB": 50
+        },
+        {
+          "workingMiB": 259,
+          "totalMiB": 260,
+          "nodeMiB": 139,
+          "heapMiB": 50
+        },
+        {
+          "workingMiB": 257,
+          "totalMiB": 258,
+          "nodeMiB": 139,
+          "heapMiB": 50
+        },
+        {
+          "workingMiB": 257,
+          "totalMiB": 258,
+          "nodeMiB": 139,
+          "heapMiB": 50
+        },
+        {
+          "workingMiB": 257,
+          "totalMiB": 258,
+          "nodeMiB": 139,
+          "heapMiB": 50
+        }
+      ]
+    },
+    {
+      "phase": "dynamic",
+      "samples": [
+        {
+          "workingMiB": 296,
+          "totalMiB": 297,
+          "nodeMiB": 153,
+          "heapMiB": 59
+        },
+        {
+          "workingMiB": 312,
+          "totalMiB": 314,
+          "nodeMiB": 162,
+          "heapMiB": 67
+        },
+        {
+          "workingMiB": 329,
+          "totalMiB": 330,
+          "nodeMiB": 167,
+          "heapMiB": 67
+        },
+        {
+          "workingMiB": 355,
+          "totalMiB": 356,
+          "nodeMiB": 172,
+          "heapMiB": 73
+        },
+        {
+          "workingMiB": 360,
+          "totalMiB": 361,
+          "nodeMiB": 178,
+          "heapMiB": 67
+        },
+        {
+          "workingMiB": 366,
+          "totalMiB": 367,
+          "nodeMiB": 179,
+          "heapMiB": 76
+        },
+        {
+          "workingMiB": 374,
+          "totalMiB": 375,
+          "nodeMiB": 180,
+          "heapMiB": 84
+        },
+        {
+          "workingMiB": 388,
+          "totalMiB": 389,
+          "nodeMiB": 188,
+          "heapMiB": 64
+        },
+        {
+          "workingMiB": 394,
+          "totalMiB": 396,
+          "nodeMiB": 188,
+          "heapMiB": 71
+        },
+        {
+          "workingMiB": 387,
+          "totalMiB": 388,
+          "nodeMiB": 188,
+          "heapMiB": 84
+        },
+        {
+          "workingMiB": 389,
+          "totalMiB": 390,
+          "nodeMiB": 188,
+          "heapMiB": 63
+        },
+        {
+          "workingMiB": 389,
+          "totalMiB": 390,
+          "nodeMiB": 188,
+          "heapMiB": 72
+        }
+      ]
+    }
+  ],
+  "optimized": [
+    {
+      "phase": "simple",
+      "samples": [
+        {
+          "workingMiB": 251,
+          "totalMiB": 252,
+          "nodeMiB": 143,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 251,
+          "totalMiB": 253,
+          "nodeMiB": 143,
+          "heapMiB": 50
+        },
+        {
+          "workingMiB": 252,
+          "totalMiB": 253,
+          "nodeMiB": 144,
+          "heapMiB": 50
+        },
+        {
+          "workingMiB": 252,
+          "totalMiB": 253,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 252,
+          "totalMiB": 253,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 251,
+          "totalMiB": 253,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 251,
+          "totalMiB": 253,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 252,
+          "totalMiB": 253,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 251,
+          "totalMiB": 253,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 250,
+          "totalMiB": 251,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 250,
+          "totalMiB": 251,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        },
+        {
+          "workingMiB": 250,
+          "totalMiB": 251,
+          "nodeMiB": 144,
+          "heapMiB": 51
+        }
+      ]
+    },
+    {
+      "phase": "dynamic",
+      "samples": [
+        {
+          "workingMiB": 282,
+          "totalMiB": 284,
+          "nodeMiB": 158,
+          "heapMiB": 61
+        },
+        {
+          "workingMiB": 297,
+          "totalMiB": 299,
+          "nodeMiB": 162,
+          "heapMiB": 64
+        },
+        {
+          "workingMiB": 312,
+          "totalMiB": 313,
+          "nodeMiB": 166,
+          "heapMiB": 60
+        },
+        {
+          "workingMiB": 323,
+          "totalMiB": 324,
+          "nodeMiB": 166,
+          "heapMiB": 54
+        },
+        {
+          "workingMiB": 334,
+          "totalMiB": 336,
+          "nodeMiB": 166,
+          "heapMiB": 50
+        },
+        {
+          "workingMiB": 341,
+          "totalMiB": 342,
+          "nodeMiB": 165,
+          "heapMiB": 49
+        },
+        {
+          "workingMiB": 291,
+          "totalMiB": 293,
+          "nodeMiB": 165,
+          "heapMiB": 61
+        },
+        {
+          "workingMiB": 284,
+          "totalMiB": 286,
+          "nodeMiB": 165,
+          "heapMiB": 56
+        },
+        {
+          "workingMiB": 287,
+          "totalMiB": 288,
+          "nodeMiB": 165,
+          "heapMiB": 53
+        },
+        {
+          "workingMiB": 288,
+          "totalMiB": 289,
+          "nodeMiB": 165,
+          "heapMiB": 64
+        },
+        {
+          "workingMiB": 293,
+          "totalMiB": 294,
+          "nodeMiB": 165,
+          "heapMiB": 56
+        },
+        {
+          "workingMiB": 291,
+          "totalMiB": 292,
+          "nodeMiB": 165,
+          "heapMiB": 53
+        }
+      ]
+    }
+  ]
+}

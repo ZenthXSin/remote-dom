@@ -64,6 +64,8 @@ npm test
 
 目录：`src/control` 为账户和容器管理，`src/server` 为浏览器引擎，`src/remote` 为远端采集，`src/client` 为本地渲染与交互，`src/gateway` 为网关；`tests` 为单元、浏览器及集成测试。
 
+内存优化与测量方法见 [性能记录](docs/performance.zh-CN.md)。当前尚未实现单容器始终低于 200 MB。
+
 ## 当前限制
 
 这是实验性的开发运行器，不是经过安全审计的多租户生产平台。代码明确禁用 `ENGINE_MODE=production` 和 `NODE_ENV=production`；当前 Docker 隔离不等同于每会话虚拟机隔离。
