@@ -1,10 +1,10 @@
 import {resolve} from 'node:path';
 import {hostname} from 'node:os';
 export interface Config {
-  host:string; port:number; mode:'demo'|'development'; chromiumPath:string;
+  host:string; port:number; mode:'demo'|'development'; chromiumPath:string; headless:boolean;
   proxy?:{server:string;username?:string;password?:string};
   hosts:Set<string>; defaultUrl?:string; maxSessions:number; idleMs:number; assetDir:string;deviceProfilePath:string;environmentProfilePath?:string;
-  stateDir?:string;accountOwner?:string;
+  stateDir?:string;accountOwner?:string;managedEgress:boolean;
 }
 export function readConfig(env:NodeJS.ProcessEnv=process.env):Config {
   if(env.NODE_ENV==='production'||env.ENGINE_MODE==='production')throw new Error('生产启动被禁用：尚未实现每会话虚拟机与内核出口隔离，不得以开发运行器替代。');
@@ -20,7 +20,11 @@ export function readConfig(env:NodeJS.ProcessEnv=process.env):Config {
   const host=env.ENGINE_HOST??'127.0.0.1';
   if(host!=='127.0.0.1'&&host!=='0.0.0.0')throw new Error('ENGINE_HOST must be 127.0.0.1 or container bind 0.0.0.0');
   if(env.ACCOUNT_OWNER&&!/^[a-f0-9]{64}$/.test(env.ACCOUNT_OWNER))throw new Error('Invalid account owner');
-  return {host,port:Number(env.PORT??4173),mode,chromiumPath:env.CHROMIUM_PATH??'/usr/bin/chromium',proxy,accountOwner:env.ACCOUNT_OWNER,
+  if(env.BROWSER_HEADLESS&&!['0','1'].includes(env.BROWSER_HEADLESS))throw new Error('BROWSER_HEADLESS must be 0 or 1');
+  if(env.MANAGED_EGRESS_POLICY&&!['0','1'].includes(env.MANAGED_EGRESS_POLICY))throw new Error('MANAGED_EGRESS_POLICY must be 0 or 1');
+  const managedEgress=env.MANAGED_EGRESS_POLICY==='1';
+  if(managedEgress&&(!env.ACCOUNT_OWNER||mode!=='development'||!proxy||!['http:','https:'].includes(new URL(proxy.server).protocol)||proxy.username||proxy.password||env.TARGET_HOSTS?.trim()!=='*'))throw new Error('Managed egress requires an isolated account worker and unrestricted public-host relay');
+  return {host,port:Number(env.PORT??4173),mode,chromiumPath:env.CHROMIUM_PATH??'/usr/bin/chromium',headless:env.BROWSER_HEADLESS!=='0',managedEgress,proxy,accountOwner:env.ACCOUNT_OWNER,
     hosts:new Set((env.TARGET_HOSTS??'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean)),defaultUrl:env.DEFAULT_TARGET_URL,
     maxSessions:4,idleMs:15*60*1000,assetDir:resolve('dist'),
     stateDir:env.BROWSER_STATE_DIR,deviceProfilePath:env.DEVICE_PROFILE_PATH??resolve(env.DEVICE_PROFILE_DIR??'.runtime/container-profiles',`${hostname()}.json`),environmentProfilePath:env.CONTAINER_ENVIRONMENT_PATH};

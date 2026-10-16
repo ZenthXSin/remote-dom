@@ -35,7 +35,7 @@ RUN --mount=type=secret,id=proxy_ca \
     && if [ -s /run/secrets/proxy_ca ]; then cat /run/secrets/proxy_ca >> /tmp/build-ca.pem; fi \
     && if [ -s /tmp/build-ca.pem ]; then set -- -o Acquire::https::CaInfo=/tmp/build-ca.pem; else set --; fi \
     && apt-get "$@" -o Acquire::http::Proxy="$HTTP_PROXY" -o Acquire::https::Proxy="$HTTPS_PROXY" update \
-    && DEBIAN_FRONTEND=noninteractive apt-get "$@" -o Acquire::http::Proxy="$HTTP_PROXY" -o Acquire::https::Proxy="$HTTPS_PROXY" install -y --no-install-recommends chromium fonts-noto-cjk ca-certificates libnss3-tools locales tzdata \
+    && DEBIAN_FRONTEND=noninteractive apt-get "$@" -o Acquire::http::Proxy="$HTTP_PROXY" -o Acquire::https::Proxy="$HTTPS_PROXY" install -y --no-install-recommends chromium xvfb fonts-noto-cjk ca-certificates libnss3-tools locales tzdata \
     && localedef -i en_US -f UTF-8 en_US.UTF-8 \
     && rm -f /tmp/build-ca.pem && rm -rf /var/lib/apt/lists/*
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=en_US:en TZ=America/Chicago CHROMIUM_PATH=/usr/bin/chromium XDG_CONFIG_HOME=/tmp/remote-dom-config XDG_CACHE_HOME=/tmp/remote-dom-cache

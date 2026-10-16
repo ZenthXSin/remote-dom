@@ -18,6 +18,7 @@ import {fontsFromCss,type RemoteFont} from './fonts.js';
 import {Uploads,type PendingFilePicker} from './uploads.js';
 import type {BrowserStore,LoginState} from './browser-store.js';
 import {proxyHostResolverRules} from './browser-network.js';
+import {createBrowserProxy} from './browser-proxy.js';
 import {monitorSocket} from './socket-health.js';
 import {AssetTransit} from './asset-transit.js';
 import {ASSET_MIMES,MAX_ASSET_BYTES,fetchAsset,type AssetBody,type AssetSource} from './asset-source.js';
@@ -45,6 +46,7 @@ export class RemoteSession {
   private releaseInputs(peer?:string,kind:'pointer'|'keyboard'|'all'='all'){this.inputQueue=this.inputQueue.then(async()=>{if(kind!=='keyboard')await this.pointer.cancel(peer);if(kind!=='pointer')await this.keyboard.cancel(peer);}).catch(()=>{});}
   private pendingDialog?:{dialog:Dialog;info:BrowserDialogMessage};
   private requestedUrl='';
+  private networkGuard?:Awaited<ReturnType<typeof createBrowserProxy>>;
   private saveTimer?:NodeJS.Timeout;
   private saveTask?:Promise<void>;
   private persistenceError='';
@@ -58,23 +60,28 @@ export class RemoteSession {
     await this.policy.assert(url);
     if(this.closed)throw new Error('Session cancelled');
     this.captureSource=await readFile(join(this.config.assetDir,'capture.js'),'utf8');
-    const proxy=this.config.proxy?{...this.config.proxy,bypass:[this.policy.fixtureOrigin,...this.policy.fixtureAliases].map(origin=>new URL(origin).host).join(',')}:undefined;
+    this.networkGuard=this.config.proxy&&!this.config.managedEgress?await createBrowserProxy(this.config.proxy,this.policy):undefined;
+    const nativeNetwork=this.config.managedEgress||!!this.networkGuard;
+    const upstream=this.networkGuard?{server:this.networkGuard.origin}:this.config.proxy;
+    // Chromium otherwise bypasses proxies implicitly for all loopback targets.
+    // Only the exact built-in fixture port may bypass the policy proxy.
+    const proxy=upstream?{...upstream,bypass:['<-loopback>',...[this.policy.fixtureOrigin,...this.policy.fixtureAliases].map(origin=>new URL(origin).host)].join(',')}:undefined;
     // Explicitly enable Chromium's sandbox. There is no --no-sandbox fallback.
-    this.browser=await chromium.launch({executablePath:this.config.chromiumPath,headless:true,chromiumSandbox:true,
-      proxy:this.config.proxy,args:['--disable-gpu','--disable-back-forward-cache','--renderer-process-limit=2','--js-flags=--optimize-for-size','--disable-quic','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--disable-background-networking',
-        ...(this.config.proxy?[`--host-resolver-rules=${proxyHostResolverRules(this.config.proxy.server,[this.policy.fixtureOrigin,...this.policy.fixtureAliases])}`]:[])]});
+    this.browser=await chromium.launch({executablePath:this.config.chromiumPath,headless:this.config.headless,chromiumSandbox:true,
+      proxy,args:['--disable-gpu','--disable-back-forward-cache','--renderer-process-limit=2','--js-flags=--optimize-for-size','--disable-quic','--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--disable-background-networking',
+        ...(proxy?[`--host-resolver-rules=${proxyHostResolverRules(proxy.server,[this.policy.fixtureOrigin,...this.policy.fixtureAliases])}`]:[])]});
     if(this.closed){await this.browser.close();throw new Error('Session cancelled');}
     const p=this.deviceProfile;
     this.context=await this.browser.newContext({...(p.platform==='Android'?{...devices['Pixel 7'],userAgent:devices['Pixel 7'].userAgent.replace(/Chrome\/[\d.]+/,`Chrome/${this.browser.version()}`)}:{}),proxy,viewport,screen:{...p.screen},deviceScaleFactor:p.deviceScaleFactor,
       locale:p.locale,timezoneId:p.timezoneId,colorScheme:p.colorScheme,isMobile:p.isMobile,hasTouch:p.hasTouch,
-      serviceWorkers:'block',acceptDownloads:true,permissions:['clipboard-write'],storageState:this.restoredState});
-    await this.context.route('**/*',async route=>{
+      serviceWorkers:nativeNetwork?'allow':'block',acceptDownloads:true,permissions:['clipboard-write'],storageState:this.restoredState});
+    if(!nativeNetwork){await this.context.route('**/*',async route=>{
       try{await this.policy.assert(route.request().url());await route.continue();}catch(error){this.diagnostics.add('policy-block',{...diagnosticTarget(route.request().url()),reason:error instanceof Error&&error.message.includes('DNS')?'dns-validation-failed':'target-not-allowed'});await route.abort('blockedbyclient').catch(()=>{});}
     });
     await this.context.routeWebSocket(/.*/,async socket=>{
       try{const url=new URL(socket.url());if(!['ws:','wss:'].includes(url.protocol))throw new Error('Invalid socket scheme');url.protocol=url.protocol==='wss:'?'https:':'http:';await this.policy.assert(url.href);socket.connectToServer();}
       catch{socket.close({code:1008,reason:'Target socket is not allowed'});}
-    });
+    });}
     this.context.on('response',response=>{void(async()=>{
       const mime=(response.headers()['content-type']??'').split(';')[0];
       if(!ASSET_MIMES.has(mime)&&mime!=='image/svg+xml'&&mime!=='text/css')return;
@@ -132,7 +139,7 @@ export class RemoteSession {
     await Promise.all([...this.windows.values()].map(async window=>{await window.cdp.send('Network.enable').catch(()=>{});}));
     const cookies=await this.context.cookies(this.page.url()).catch(()=>[]);
     this.diagnostics.add('cookie-baseline',{clearance:cookies.some(c=>c.name==='cf_clearance'),botManagement:cookies.some(c=>c.name==='__cf_bm')});
-    this.diagnostics.add('environment',{proxyConfigured:!!this.config.proxy,platform:this.deviceProfile.platform});
+    this.diagnostics.add('environment',{proxyConfigured:!!this.config.proxy,platform:this.deviceProfile.platform,network:this.config.managedEgress?'managed-relay':this.networkGuard?'proxy-policy':'browser-routing'});
     return this.diagnostics.report();
   }
   async stopDiagnostics(){const report=this.diagnostics.stop();await Promise.all([...this.windows.values()].map(window=>window.cdp.send('Network.disable').catch(()=>{})));return report;}
@@ -402,5 +409,5 @@ export class RemoteSession {
     if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
   summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,persistenceError:this.persistenceError||undefined};}
-  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;await this.pointer.cancel();await this.keyboard.cancel();this.diagnostics.clear();clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
+  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;await this.pointer.cancel();await this.keyboard.cancel();this.diagnostics.clear();clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});await this.networkGuard?.close();this.networkGuard=undefined;this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
 }
