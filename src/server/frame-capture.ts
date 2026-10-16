@@ -185,7 +185,7 @@ export class FrameCapture {
     return {...combined,focused,nodes:output,unsupported:[...unsupported],truncated:[...translated.values()].some(d=>d.truncated)};
   }
   route(id?:string){return id?this.routes.get(id):{frame:this.main,localId:''};}
-  async click(route:NodeRoute,x?:number,y?:number,hover=false,modifiers:{ctrl?:boolean;meta?:boolean;shift?:boolean;alt?:boolean;clickCount?:number;pointerType?:'mouse'|'touch'|'pen'}={}){
+  async position(route:NodeRoute,x?:number,y?:number,hover=false){
     const chain:CaptureFrame[]=[];let frame=route.frame;
     while(frame.owner){chain.unshift(frame);frame=frame.owner.frame;}
     if(!hover)for(const child of chain)await this.evaluate(child.owner!.frame,`window.__remoteDom.node(${JSON.stringify(child.owner!.nodeId)})?.scrollIntoView({behavior:'instant',block:'nearest',inline:'nearest'})`);
@@ -193,8 +193,12 @@ export class FrameCapture {
     const position=await this.evaluate(route.frame,`(()=>{let n=window.__remoteDom.node(${JSON.stringify(route.localId)});if(!(n instanceof Element))return null;while(n&&(!n.getBoundingClientRect().width||!n.getBoundingClientRect().height))n=n.parentElement??n.getRootNode().host;if(!n)return null;${hover?'':"n.scrollIntoView({behavior:'instant',block:'nearest',inline:'nearest'});"}const r=n.getBoundingClientRect();return {x:r.x+r.width*${relativeX},y:r.y+r.height*${relativeY}};})()`);
     if(!position)throw new Error('Missing node');
     for(const child of chain){const offset=await this.evaluate(child.owner!.frame,`(()=>{const n=window.__remoteDom.node(${JSON.stringify(child.owner!.nodeId)});const r=n.getBoundingClientRect();return {x:r.left+n.clientLeft,y:r.top+n.clientTop};})()`);position.x+=offset.x;position.y+=offset.y;}
+    return position as {x:number;y:number};
+  }
+  async click(route:NodeRoute,x?:number,y?:number,hover=false,modifiers:{ctrl?:boolean;meta?:boolean;shift?:boolean;alt?:boolean;clickCount?:number;pointerType?:'mouse'|'touch'|'pen'}={}){
+    const position=await this.position(route,x,y,hover);
     if(hover){await this.page.mouse.move(position.x,position.y);return;}
-    const keys=[modifiers.ctrl||modifiers.meta?'Control':'',modifiers.shift?'Shift':'',modifiers.alt?'Alt':''].filter(Boolean);
+    const keys=[modifiers.ctrl?'Control':'',modifiers.meta?'Meta':'',modifiers.shift?'Shift':'',modifiers.alt?'Alt':''].filter(Boolean);
     try{for(const key of keys)await this.page.keyboard.down(key);
       if(modifiers.pointerType==='touch'){
         await this.page.touchscreen.tap(position.x,position.y);

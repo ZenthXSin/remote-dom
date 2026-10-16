@@ -1,3 +1,5 @@
+import {RemoteKeyboardInput} from './keyboard-input.js';
+import {RemotePointerInput} from './pointer-input.js';
 import {watchNetworkDiagnostics} from './network-diagnostics.js';
 import {Diagnostics,diagnosticTarget,diagnosticCookies,diagnosticSetCookies} from './diagnostics.js';
 import {randomUUID,createHash} from 'node:crypto';
@@ -38,6 +40,9 @@ export class RemoteSession {
   private lastError=''; private inputQueue=Promise.resolve(); private queued=0;
   private events=new Map<string,number>(); private history=new Map<number,Snapshot>();
   private inputRevision=0;
+  private pointer=new RemotePointerInput(peer=>this.releaseInputs(peer,'pointer'));
+  private keyboard=new RemoteKeyboardInput(peer=>this.releaseInputs(peer,'keyboard'));
+  private releaseInputs(peer?:string,kind:'pointer'|'keyboard'|'all'='all'){this.inputQueue=this.inputQueue.then(async()=>{if(kind!=='keyboard')await this.pointer.cancel(peer);if(kind!=='pointer')await this.keyboard.cancel(peer);}).catch(()=>{});}
   private pendingDialog?:{dialog:Dialog;info:BrowserDialogMessage};
   private requestedUrl='';
   private saveTimer?:NodeJS.Timeout;
@@ -118,7 +123,7 @@ export class RemoteSession {
         const body=await readFile(path);if(this.closed)return;this.downloads.set(randomUUID(),{name:download.suggestedFilename().replace(/[\\/\x00-\x1f]/g,'_').slice(0,200)||'download',body});this.downloadBytes+=body.length;
       }finally{this.downloading--;await download.delete().catch(()=>{});}
     })().catch(()=>{});});
-    cdp.on('Page.frameNavigated',({frame})=>{if(!frame.parentId&&this.page===page){this.epoch=randomUUID();this.current=undefined;this.history.clear();this.picker=undefined;this.uploads.clear();}});
+    cdp.on('Page.frameNavigated',({frame})=>{if(!frame.parentId&&this.page===page){this.releaseInputs();this.epoch=randomUUID();this.current=undefined;this.history.clear();this.picker=undefined;this.uploads.clear();}});
     page.on('close',()=>{this.windows.delete(id);if(this.activeWindow===id&&!this.closed){const fallback=[...this.windows.keys()].at(-1);if(fallback)void this.selectWindow(fallback);}});
     await this.selectWindow(id);
   }
@@ -133,6 +138,7 @@ export class RemoteSession {
   async stopDiagnostics(){const report=this.diagnostics.stop();await Promise.all([...this.windows.values()].map(window=>window.cdp.send('Network.disable').catch(()=>{})));return report;}
   async selectWindow(id:string){
     const window=this.windows.get(id);if(!window||window.page.isClosed())throw new Error('窗口不存在');
+    await this.pointer.cancel();await this.keyboard.cancel();
     this.page=window.page;this.cdp=window.cdp;this.capture=window.capture;this.activeWindow=id;
     this.epoch=randomUUID();this.current=undefined;this.history.clear();await this.metrics();await this.page.bringToFront();
     this.picker=undefined;this.uploads.clear();
@@ -196,7 +202,7 @@ export class RemoteSession {
     this.lastActivity=Date.now();this.sockets.add(socket);const peer=randomUUID();this.events.set(peer,0);
     if(this.current)this.send(socket,this.current);
     if(this.pendingDialog)this.send(socket,this.pendingDialog.info);
-    socket.on('close',()=>{this.sockets.delete(socket);this.events.delete(peer);});
+    socket.on('close',()=>{this.sockets.delete(socket);this.events.delete(peer);this.releaseInputs(peer);});
     socket.on('message',data=>{
       let message:unknown;try{message=JSON.parse(data.toString());}catch{return socket.close(1008,'Invalid JSON');}
       if((message as {type?:string})?.type==='render-flow'){this.renderFlow.get(socket)!.enabled=true;return;}
@@ -238,7 +244,7 @@ export class RemoteSession {
     this.view();
     let respond!:(value:ServerMessage)=>void;const result=new Promise<ServerMessage>(resolve=>respond=resolve);
     this.inputQueue=this.inputQueue.then(async()=>{
-      try{if(this.closed||event.epoch!==this.epoch)throw new Error('stale');const clipboard=await this.applyEvent(event);if(event.action!=='hover')this.inputRevision++;respond(typeof clipboard==='string'?{type:'clipboard',text:clipboard,eventId:event.eventId,inputRevision:this.inputRevision}:{type:'ack',eventId:event.eventId,inputRevision:this.inputRevision});}
+      try{if(this.closed||event.epoch!==this.epoch)throw new Error('stale');const clipboard=await this.applyEvent(event,peer);if(event.action!=='hover')this.inputRevision++;respond(typeof clipboard==='string'?{type:'clipboard',text:clipboard,eventId:event.eventId,inputRevision:this.inputRevision}:{type:'ack',eventId:event.eventId,inputRevision:this.inputRevision});}
       catch{respond({type:'error',message:'操作未完成，请重试',eventId:event.eventId});}
       finally{this.queued--;if(captureAfter&&!this.pendingDialog)void this.syncAfterInput().catch(()=>{});}
     });return result;
@@ -247,12 +253,18 @@ export class RemoteSession {
     return !!event&&event.type==='event'&&Number.isSafeInteger(event.eventId)&&event.eventId>0&&typeof event.epoch==='string'
       &&['click','hover','focus','input','key','scroll','viewport','select','navigation','dialog','media','pointer'].includes(event.action)
       &&(event.nodeId===undefined||/^n\d+$/.test(event.nodeId))
+      &&(event.keyPhase===undefined||['down','up','cancel'].includes(event.keyPhase))
+      &&(event.nativePointer===undefined||typeof event.nativePointer==='boolean')
+      &&[event.x,event.y,event.offsetX,event.offsetY,event.pressure,event.tiltX,event.tiltY].every(value=>value===undefined||typeof value==='number'&&Number.isFinite(value))
+      &&(event.pressure===undefined||event.pressure>=0&&event.pressure<=1)
+      &&[event.tiltX,event.tiltY].every(value=>value===undefined||value>=-90&&value<=90)
       &&(event.pointerType===undefined||['mouse','touch','pen'].includes(event.pointerType))
       &&(event.clickCount===undefined||Number.isInteger(event.clickCount)&&event.clickCount>=1&&event.clickCount<=3)
       &&(event.value===undefined||typeof event.value==='string'&&event.value.length<=10000);
   }
   private async evaluate(expression:string,frame?:CaptureFrame) {return this.capture.evaluate(frame??this.capture.main,expression);}
-  private async applyEvent(event:UserEvent) {
+  private async applyEvent(event:UserEvent,peer:string) {
+    if(event.action==='key'&&event.keyPhase==='cancel'){await this.keyboard.cancel(peer);return;}
     if(event.action==='navigation'){if(!['back','forward','reload'].includes(event.key??''))throw new Error('Invalid navigation');await this.navigation(event.key as 'back'|'forward'|'reload');return;}
     if(event.action==='viewport'){
       if(!Number.isFinite(event.width)||!Number.isFinite(event.height))throw new Error('Invalid viewport');
@@ -260,6 +272,16 @@ export class RemoteSession {
       // the viewport through CDP so a window resize never changes device identity.
       this.viewport={width:Math.max(160,Math.min(3840,Math.round(event.width!))),height:Math.max(160,Math.min(2160,Math.round(event.height!)))};
       await this.metrics();return;
+    }
+    if(event.action==='pointer'&&event.nativePointer){
+      if(!['down','move','up','cancel'].includes(event.key??'')||!Number.isFinite(event.x)||!Number.isFinite(event.y))throw new Error('Invalid pointer');
+      let position:{x:number;y:number}|undefined;
+      if(event.key==='down'){
+        if(!event.nodeId||!this.current?.nodes.some(n=>n.id===event.nodeId))throw new Error('Stale pointer target');
+        const route=this.capture.route(event.nodeId);if(!route)throw new Error('Pointer frame unavailable');
+        position=await this.capture.position(route,event.offsetX,event.offsetY);
+      }
+      await this.pointer.dispatch(event,peer,this.cdp,this.deviceProfile.hasTouch,position);return;
     }
     if(event.action==='pointer'){
       if(!['down','move','up'].includes(event.key??'')||!Number.isFinite(event.x)||!Number.isFinite(event.y))throw new Error('Invalid pointer');
@@ -301,9 +323,10 @@ export class RemoteSession {
       return;
     }
     if(event.action==='key'){
-      if(!event.key||!/^(Enter|Tab|Escape|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Backspace|Delete|F[1-9]|F1[0-2]|[\x20-\x7e])$/.test(event.key))throw new Error('Unsupported key');
-      if(event.nodeId)await evaluate(`(()=>{const n=${node};if(n instanceof HTMLElement)n.focus({preventScroll:true});})()`);
-      const keys=[event.ctrl||event.meta?'Control':'',event.alt?'Alt':'',event.shift?'Shift':''].filter(Boolean);
+      if(!event.key||!/^(Control|Meta|Alt|Shift|Enter|Tab|Escape|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Backspace|Delete|F[1-9]|F1[0-2]|[\x20-\x7e])$/.test(event.key))throw new Error('Unsupported key');
+      if(event.nodeId&&event.keyPhase!=='up'&&!['Control','Meta','Alt','Shift'].includes(event.key)&&!this.keyboard.held(peer,event.key))await evaluate(`(()=>{const n=${node};if(n instanceof HTMLElement)n.focus({preventScroll:true});})()`);
+      if(event.keyPhase){await this.keyboard.dispatch(event,peer,this.page);return;}
+      const keys=[event.ctrl?'Control':'',event.meta?'Meta':'',event.alt?'Alt':'',event.shift?'Shift':''].filter(Boolean);
       try{for(const key of keys)await this.page.keyboard.down(key);await this.page.keyboard.press(event.key);}finally{for(const key of keys.reverse())await this.page.keyboard.up(key);}return;
     }
     if(event.action==='select'){
@@ -379,5 +402,5 @@ export class RemoteSession {
     if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
   summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,persistenceError:this.persistenceError||undefined};}
-  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;this.diagnostics.clear();clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
+  async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;await this.pointer.cancel();await this.keyboard.cancel();this.diagnostics.clear();clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
 }

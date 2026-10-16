@@ -100,6 +100,10 @@ export interface UserEvent {
   clipboard?:boolean;
   clickCount?:number;
   pointerType?:'mouse'|'touch'|'pen';
+  nativePointer?:boolean;
+  keyPhase?:'down'|'up'|'cancel';
+  offsetX?:number;offsetY?:number;
+  pressure?:number;tiltX?:number;tiltY?:number;
   value?:string; key?:string; shift?:boolean; ctrl?:boolean; alt?:boolean; meta?:boolean;
   selectionStart?:number; selectionEnd?:number;
   x?:number; y?:number; width?:number; height?:number;

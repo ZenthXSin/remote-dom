@@ -170,11 +170,12 @@ function receive(message:any,id:string,localGeneration:number){
   }).catch(()=>{if(localGeneration===generation){resync();notice('同步暂不可用，请重新连接',true);}});
 }
 function online(){connected=true;frame.inert=false;notice(uncertainInput?'最近操作尚未确认，请核对页面状态':'已连接 · 页面由本地 DOM 渲染',uncertainInput);uncertainInput=false;$('connection').textContent='在线';$('connection').className='online';}
-function offline(){connected=false;frame.inert=true;$('connection').textContent='已断开';$('connection').className='';notice('连接中断，正在重新同步…');}
+function offline(){connected=false;port.postMessage({type:'input-reset'});frame.inert=true;$('connection').textContent='已断开';$('connection').className='';notice('连接中断，正在重新同步…');}
 function resync(){httpEpoch='';httpSeq=-1;if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({type:'resync'}));}
 function sendEvent(event:UserEvent){
   const last=pendingEvents.at(-1);
-  if(last&&last.epoch===event.epoch&&(transport==='http'?['input','hover','scroll','viewport']:['hover','scroll','viewport']).includes(event.action)&&last.action===event.action&&last.nodeId===event.nodeId){pendingEvents.pop();const sent=sentAt.get(last.eventId);if(sent?.frameId!==undefined)port.postMessage({type:'ack',eventId:sent.frameId});sentAt.delete(last.eventId);operationFeedback();}
+  const pointerMove=last?.action==='pointer'&&event.action==='pointer'&&last.nativePointer&&event.nativePointer&&last.key==='move'&&event.key==='move'&&last.pointerType===event.pointerType;
+  if(last&&last.epoch===event.epoch&&(pointerMove||(transport==='http'?['input','hover','scroll','viewport']:['hover','scroll','viewport']).includes(event.action)&&last.action===event.action&&last.nodeId===event.nodeId)){pendingEvents.pop();const sent=sentAt.get(last.eventId);if(sent?.frameId!==undefined)port.postMessage({type:'ack',eventId:sent.frameId});sentAt.delete(last.eventId);operationFeedback();}
   pendingEvents.push(event);
   if(transport!=='http'&&!['hover','scroll','viewport'].includes(event.action)){clearTimeout(eventTimer);eventTimer=undefined;void flushEvents();return;}
   if(!writeBusy&&!eventTimer)eventTimer=setTimeout(()=>{eventTimer=undefined;void flushEvents();},8);

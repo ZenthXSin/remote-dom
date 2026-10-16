@@ -1,4 +1,5 @@
 import {STYLE_DEFAULTS,SAFE_TAGS,SAFE_ATTRS,SVG_TAGS,SVG_ATTRS,STYLE_PROPERTIES,type MirrorNode,type Snapshot,type Patch,type UserEvent} from '../shared/protocol.js';
+import {PointerInput} from './pointer-input.js';
 import {MirrorRules} from './rules.js';
 import {collectNodeAssets} from '../shared/assets.js';
 const mount=document.getElementById('mirror-root')!;
@@ -34,7 +35,7 @@ const expectedScrolls=new Map<string,{x:number;y:number;at:number}>();
 let gestureUntil=0;
 let zoom=1;
 let bodyScrollsWindow=false;
-let pointerGesture:{id:number;x:number;y:number;dragging:boolean}|undefined;let pointerWaiting=0;let pointerPending:{x:number;y:number}|undefined;let suppressClickUntil=0;
+const pointerInput=new PointerInput(emit,pointerNode,()=>{input();pendingHover=undefined;clearTimeout(hoverTimer);},()=>zoom);
 let pendingHover:{nodeId:string;x:number;y:number}|undefined;
 let lastHover:{nodeId:string;x:number;y:number}|undefined;
 let hoverWaiting=0;let hoverTimer:ReturnType<typeof setTimeout>|undefined;
@@ -48,7 +49,7 @@ function ownsScroll(key:string,x:number,y:number){
   if(Math.abs(intent.x-x)<2&&Math.abs(intent.y-y)<2&&performance.now()-intent.at>160){scrollIntents.delete(key);return false;}
   return true;
 }
-function reset(clearAssets=false){clearTimeout(scrollTimer);scrollTimer=undefined;pendingScrolls.clear();clearTimeout(inputTimer);clearTimeout(hoverTimer);if(assetPaint!==undefined)cancelAnimationFrame(assetPaint);assetPaint=undefined;pendingAssets.clear();assetNodes.clear();nodeAssets.clear();mirrorRules.clear();for(const face of fontFaces.values())document.fonts.delete(face);fontFaces.clear();currentFonts=[];pendingInput=undefined;pendingHover=undefined;lastHover=undefined;hoverWaiting=0;pointerGesture=undefined;pointerPending=undefined;pointerWaiting=0;composing=false;mount.replaceChildren();nodes.clear();records.clear();dirty.clear();inputAcks.clear();inputRevision=-1;currentRoot='';editableIntents.clear();scrollIntents.clear();expectedScrolls.clear();epoch='';seq=-1;if(clearAssets){for(const url of assets.values())URL.revokeObjectURL(url);assets.clear();}}
+function reset(clearAssets=false){releaseKeys();clearTimeout(scrollTimer);scrollTimer=undefined;pendingScrolls.clear();clearTimeout(inputTimer);clearTimeout(hoverTimer);if(assetPaint!==undefined)cancelAnimationFrame(assetPaint);assetPaint=undefined;pendingAssets.clear();assetNodes.clear();nodeAssets.clear();mirrorRules.clear();for(const face of fontFaces.values())document.fonts.delete(face);fontFaces.clear();currentFonts=[];pendingInput=undefined;pendingHover=undefined;lastHover=undefined;hoverWaiting=0;pointerInput.reset();composing=false;mount.replaceChildren();nodes.clear();records.clear();dirty.clear();inputAcks.clear();inputRevision=-1;currentRoot='';editableIntents.clear();scrollIntents.clear();expectedScrolls.clear();epoch='';seq=-1;if(clearAssets){for(const url of assets.values())URL.revokeObjectURL(url);assets.clear();}}
 function emit(event:Omit<UserEvent,'type'|'epoch'|'eventId'>){if(!epoch)return 0;const id=++eventId;port.postMessage({type:'event',epoch,eventId:id,...event});return id;}
 function retireInputs(){const released:string[]=[];for(const [id,sent]of dirty){const revision=inputAcks.get(sent);if(revision!==undefined&&inputRevision>=revision){dirty.delete(id);editableIntents.delete(id);inputAcks.delete(sent);released.push(id);}}const pending=new Set(dirty.values());for(const event of inputAcks.keys())if(!pending.has(event))inputAcks.delete(event);return released;}
 function idFor(target:EventTarget|null){let n=target as Node|null;while(n&&!reverse.has(n))n=n.parentNode;return n?reverse.get(n):undefined;}
@@ -193,9 +194,9 @@ window.addEventListener('message',event=>{
     if(message.type==='asset'){if(assets.has(message.id))return;assets.set(message.id,URL.createObjectURL(new Blob([message.bytes],{type:message.mime})));assetVersion++;pendingAssets.add(message.id);if(assetPaint===undefined)assetPaint=requestAnimationFrame(()=>scheduleWork(paintAssets));return;}
     if(message.type==='snapshot'||message.type==='patch')await update(message);
     if(message.type==='reset')reset(true);
+    if(message.type==='input-reset'){pointerInput.reset();releaseKeys();pendingHover=undefined;clearTimeout(hoverTimer);}
     if(message.type==='ack'||message.type==='error'){
       if(message.type==='error')lastHover=undefined;
-      if(pointerWaiting===message.eventId){pointerWaiting=0;sendPointerMove();}
       if(hoverWaiting===message.eventId){hoverWaiting=0;clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}
       if(message.type==='ack'&&message.inputRevision!==undefined){if([...dirty.values()].includes(message.eventId))inputAcks.set(message.eventId,message.inputRevision);const released=retireInputs();const changed=new Map<string,MirrorNode>();const add=(id:string)=>{const record=records.get(id);if(record&&!changed.has(id)){changed.set(id,record);for(const child of record.children??[])add(child);}};for(const id of released)add(id);if(changed.size)await applyRecords([...changed.values()],[],currentRoot);}
       else for(const [id,sent]of dirty)if(sent===message.eventId&&!editableIntents.has(id))dirty.delete(id);
@@ -205,7 +206,7 @@ window.addEventListener('message',event=>{
   port.start();port.postMessage({type:'ready'});
 });
 document.addEventListener('click',event=>{
-  if(performance.now()<suppressClickUntil){event.preventDefault();return;}
+  if(pointerInput.handlesClick(event)){event.preventDefault();return;}
   const target=pointerNode(event.target);if(!target)return;input();
   const control=nodes.get(target.nodeId);if(control instanceof HTMLMediaElement)return;if(control instanceof HTMLSelectElement||control instanceof HTMLInputElement&&['range','color','date','time','datetime-local','month','week'].includes(control.type)){emit({action:'focus',nodeId:target.nodeId});return;}
   event.preventDefault();
@@ -219,7 +220,7 @@ document.addEventListener('click',event=>{
 },true);
 function sameHover(hover:{nodeId:string;x:number;y:number}){return lastHover?.nodeId===hover.nodeId&&Math.abs(lastHover.x-hover.x)<.0001&&Math.abs(lastHover.y-hover.y)<.0001;}
 function sendHover(){if(hoverWaiting||!pendingHover||!epoch)return;const hover=pendingHover;pendingHover=undefined;if(sameHover(hover))return;lastHover=hover;hoverWaiting=emit({action:'hover',...hover});hoverTimer=setTimeout(()=>{hoverWaiting=0;sendHover();},2500);}
-document.addEventListener('mousemove',event=>{if(pointerGesture){lastHover=undefined;return;}const target=pointerNode(event.target);if(!target){lastHover=undefined;return;}const {nodeId,rect}=target;const hover={nodeId,x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height};if(sameHover(hover)){pendingHover=undefined;if(!hoverWaiting)clearTimeout(hoverTimer);return;}pendingHover=hover;if(!hoverWaiting){clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}});
+document.addEventListener('mousemove',event=>{if(pointerInput.held){lastHover=undefined;return;}const target=pointerNode(event.target);if(!target){lastHover=undefined;return;}const {nodeId,rect}=target;const hover={nodeId,x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height};if(sameHover(hover)){pendingHover=undefined;if(!hoverWaiting)clearTimeout(hoverTimer);return;}pendingHover=hover;if(!hoverWaiting){clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}});
 document.addEventListener('submit',event=>event.preventDefault());
 document.addEventListener('compositionstart',()=>{composing=true;});
 document.addEventListener('compositionend',event=>{composing=false;const target=editableTarget(event.target)??event.target;if(target instanceof HTMLElement&&(target.isContentEditable||target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement)){pendingInput=target;input();}});
@@ -230,8 +231,21 @@ document.addEventListener('input',event=>{
 document.addEventListener('focusout',event=>{if(editableTarget(event.target))setTimeout(()=>port.postMessage({type:'resync'}),0);});
 function selectControl(event:Event){const target=event.target;if(target instanceof HTMLSelectElement||target instanceof HTMLInputElement&&['range','color','date','time','datetime-local','month','week'].includes(target.type)){const id=reverse.get(target);if(id)dirty.set(id,emit({action:'select',nodeId:id,value:target.value}));}}
 document.addEventListener('change',selectControl);document.addEventListener('input',event=>{if(event.target instanceof HTMLInputElement&&event.target.type==='range')selectControl(event);});
+const heldKeys=new Map<string,{key:string}>();
+function releaseKeys(){if(heldKeys.size)emit({action:'key',keyPhase:'cancel'});heldKeys.clear();}
+function forwardKey(event:KeyboardEvent){
+  const held=heldKeys.get(event.code),key=held?.key??event.key;heldKeys.set(event.code,{key});
+  emit({action:'key',keyPhase:'down',nodeId:idFor(event.target),key,shift:event.shiftKey,ctrl:event.ctrlKey,alt:event.altKey,meta:event.metaKey});
+}
+document.addEventListener('keyup',event=>{
+  const held=heldKeys.get(event.code);if(!held)return;heldKeys.delete(event.code);
+  emit({action:'key',keyPhase:'up',key:held.key,shift:event.shiftKey,ctrl:event.ctrlKey,alt:event.altKey,meta:event.metaKey});
+});
+window.addEventListener('blur',releaseKeys);window.addEventListener('pagehide',releaseKeys);
+document.addEventListener('visibilitychange',()=>{if(document.hidden)releaseKeys();});
 document.addEventListener('keydown',event=>{
   if(composing||event.isComposing)return;
+  if(['Control','Meta','Alt','Shift'].includes(event.key)){forwardKey(event);return;}
   const target=event.target;const editing=target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement||!!editableTarget(target);
   const command=event.ctrlKey||event.metaKey;
   if(command&&event.key.toLowerCase()==='f'){event.preventDefault();port.postMessage({type:'open-find'});return;}
@@ -242,7 +256,7 @@ document.addEventListener('keydown',event=>{
   const movement=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(event.key);
   if(!mandatory&&!movement&&!command&&!event.altKey&&editing)return;
   if(!/^(Enter|Tab|Escape|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Backspace|Delete|F[1-9]|F1[0-2]|[\x20-\x7e])$/.test(event.key))return;
-  if(mandatory||command||event.altKey||!editing)event.preventDefault();input();emit({action:'key',nodeId:idFor(event.target),key:event.key,shift:event.shiftKey,ctrl:event.ctrlKey,alt:event.altKey,meta:event.metaKey});
+  if(mandatory||command||event.altKey||!editing)event.preventDefault();input();forwardKey(event);
 });
 let scrollTimer:ReturnType<typeof setTimeout>|undefined;
 const pendingScrolls=new Map<string,{nodeId?:string;x:number;y:number}>();
@@ -271,10 +285,4 @@ for(const kind of ['play','pause','seeking','volumechange','ratechange'])documen
   else{if(expected.volume===node.volume||expected.muted===node.muted){delete expected.volume;delete expected.muted;return;}emit({action:'media',nodeId,key:'volume',mediaValue:node.volume});dirty.set(nodeId,emit({action:'media',nodeId,key:'muted',accept:node.muted}));}
 },true);
 
-function sendPointerMove(){if(pointerWaiting||!pointerGesture?.dragging||!pointerPending)return;const point=pointerPending;pointerPending=undefined;pointerWaiting=emit({action:'pointer',key:'move',x:point.x/zoom,y:point.y/zoom});}
 document.addEventListener('dragstart',event=>event.preventDefault());
-document.addEventListener('pointerdown',event=>{if(event.button!==0||!['mouse','pen'].includes(event.pointerType)||(event.target as Element)?.closest('input,textarea,select,audio,video,[contenteditable]'))return;pointerGesture={id:event.pointerId,x:event.clientX,y:event.clientY,dragging:false};},true);
-document.addEventListener('pointermove',event=>{const gesture=pointerGesture;if(!gesture||event.pointerId!==gesture.id||!(event.buttons&1))return;if(!gesture.dragging&&Math.hypot(event.clientX-gesture.x,event.clientY-gesture.y)<5)return;
-  if(!gesture.dragging){gesture.dragging=true;input();pendingHover=undefined;emit({action:'pointer',key:'down',x:gesture.x/zoom,y:gesture.y/zoom});(event.target as Element)?.setPointerCapture?.(event.pointerId);}event.preventDefault();pointerPending={x:event.clientX,y:event.clientY};sendPointerMove();},true);
-function finishPointer(event:PointerEvent){const gesture=pointerGesture;if(!gesture||gesture.id!==event.pointerId)return;if(gesture.dragging){event.preventDefault();emit({action:'pointer',key:'up',x:event.clientX/zoom,y:event.clientY/zoom});suppressClickUntil=performance.now()+300;}pointerGesture=undefined;pointerPending=undefined;}
-document.addEventListener('pointerup',finishPointer,true);document.addEventListener('pointercancel',finishPointer,true);
