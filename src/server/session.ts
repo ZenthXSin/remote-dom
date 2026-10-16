@@ -65,7 +65,7 @@ export class RemoteSession {
         ...(this.config.proxy?[`--host-resolver-rules=${proxyHostResolverRules(this.config.proxy.server,[this.policy.fixtureOrigin,...this.policy.fixtureAliases])}`]:[])]});
     if(this.closed){await this.browser.close();throw new Error('Session cancelled');}
     const p=this.deviceProfile;
-    this.context=await this.browser.newContext({...(p.platform==='Android'?devices['Pixel 7']:{}),proxy,viewport,screen:{...p.screen},deviceScaleFactor:p.deviceScaleFactor,
+    this.context=await this.browser.newContext({...(p.platform==='Android'?{...devices['Pixel 7'],userAgent:devices['Pixel 7'].userAgent.replace(/Chrome\/[\d.]+/,`Chrome/${this.browser.version()}`)}:{}),proxy,viewport,screen:{...p.screen},deviceScaleFactor:p.deviceScaleFactor,
       locale:p.locale,timezoneId:p.timezoneId,colorScheme:p.colorScheme,isMobile:p.isMobile,hasTouch:p.hasTouch,
       serviceWorkers:'block',acceptDownloads:true,permissions:['clipboard-write'],storageState:this.restoredState});
     await this.context.route('**/*',async route=>{
