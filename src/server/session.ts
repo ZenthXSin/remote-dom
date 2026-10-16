@@ -21,6 +21,7 @@ import {proxyHostResolverRules} from './browser-network.js';
 import {createBrowserProxy} from './browser-proxy.js';
 import {monitorSocket} from './socket-health.js';
 import {AssetTransit} from './asset-transit.js';
+import {ClaudeLoginError,importClaudeSession} from './claude-login.js';
 import {ASSET_MIMES,MAX_ASSET_BYTES,fetchAsset,type AssetBody,type AssetSource} from './asset-source.js';
 
 export class RemoteSession {
@@ -49,6 +50,7 @@ export class RemoteSession {
   private networkGuard?:Awaited<ReturnType<typeof createBrowserProxy>>;
   private saveTimer?:NodeJS.Timeout;
   private saveTask?:Promise<void>;
+  private claudeLoginBusy=false;
   private persistenceError='';
   private pollTask?:Promise<void>;
   private lastViewActivity=0;private capturedAssetState='';
@@ -398,6 +400,16 @@ export class RemoteSession {
     this.saveTask=task;void task.then(()=>{if(this.saveTask===task)this.saveTask=undefined;},()=>{if(this.saveTask===task)this.saveTask=undefined;});return task;
   }
   disablePersistence(){clearInterval(this.saveTimer);this.store=undefined;}
+  async loginClaude(value:unknown){
+    if(this.claudeLoginBusy)throw new ClaudeLoginError('正在应用 Claude 登录凭据，请稍候',409);
+    if(this.closed||!this.context||!this.page||this.page.isClosed())throw new ClaudeLoginError('请先打开或恢复浏览器',409);
+    if(this.pendingDialog)throw new ClaudeLoginError('请先处理远端网页的提示框',409);
+    this.claudeLoginBusy=true;
+    try{return await importClaudeSession(value,this.context,this.page,this.policy,this.store?async()=>{
+      // An autosave already in progress may have captured the previous cookies.
+      await this.saveTask?.catch(()=>{});await this.saveState();
+    }:undefined);}finally{this.claudeLoginBusy=false;}
+  }
   async navigate(url:string){await this.policy.assert(url);await this.page.goto(url,{waitUntil:'domcontentloaded',timeout:20000});}
   async navigation(action:'back'|'forward'|'reload'){
     if(action==='back')await this.page.goBack({waitUntil:'domcontentloaded'});

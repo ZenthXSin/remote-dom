@@ -25,6 +25,39 @@ function nextEventId(){const id=++eventCounter;sessionStorage.setItem('rd_event_
 let zoom=1;
 let browserBusy=false;
 function setBrowserBusy(value:boolean){browserBusy=value;for(const id of ['resume-browser','forget-browser','destroy','create','demo']){const button=document.getElementById(id) as HTMLButtonElement|null;if(button)button.disabled=value;}}
+const claudeDialog=$<HTMLDialogElement>('claude-login-dialog');
+const claudeKey=$<HTMLInputElement>('claude-session-key');
+let claudeTarget='';let claudeBusy=false;
+$('claude-login-open').addEventListener('click',()=>{
+  if(browserBusy||claudeBusy)return;
+  if(!activeId){notice('请先打开或恢复浏览器，再使用 sessionKey 登录 Claude',true);return;}
+  claudeTarget=activeId;claudeKey.value='';$('claude-login-status').textContent='';claudeDialog.showModal();claudeKey.focus();
+});
+function closeClaudeLogin(){if(claudeBusy)return;claudeKey.value='';claudeTarget='';claudeDialog.close();}
+$('claude-login-close').addEventListener('click',closeClaudeLogin);
+claudeDialog.addEventListener('cancel',event=>{event.preventDefault();closeClaudeLogin();});
+claudeDialog.addEventListener('close',()=>{claudeKey.value='';claudeTarget='';});
+window.addEventListener('pagehide',()=>{claudeKey.value='';});
+$('claude-login-form').addEventListener('submit',event=>{event.preventDefault();void loginClaude();});
+async function loginClaude(){
+  if(claudeBusy)return;
+  const id=claudeTarget;
+  if(!id||id!==activeId){claudeKey.value='';$('claude-login-status').textContent='当前浏览器已改变，请关闭后重新打开此工具';return;}
+  const payload={sessionKey:claudeKey.value.trim()};claudeKey.value='';
+  claudeBusy=true;setBrowserBusy(true);
+  $<HTMLButtonElement>('claude-login-submit').disabled=true;$<HTMLButtonElement>('claude-login-close').disabled=true;
+  $('claude-login-status').textContent='正在应用凭据并打开 Claude…';
+  try{
+    const request=api(`/api/sessions/${id}/claude-login`,'POST',payload);payload.sessionKey='';
+    const result=await request;
+    const message=result.navigation==='opened'?'凭据已应用，已打开 Claude。请在页面确认登录结果。':'凭据已应用，Claude 页面尚未完成加载，请稍后刷新远端网页。';
+    notice(message);
+    if(result.persistence==='failed')persistenceNotice('登录凭据已应用，但环境保存失败。请保持浏览器打开并稍后重试保存。');
+    else if(result.persistence==='disabled')persistenceNotice('当前环境未启用登录状态保存，关闭后需重新填写 sessionKey。');
+    claudeDialog.close();
+  }catch(error){$('claude-login-status').textContent=error instanceof Error?error.message:'Claude 登录请求未完成，请重试';}
+  finally{payload.sessionKey='';claudeKey.value='';claudeBusy=false;setBrowserBusy(false);$<HTMLButtonElement>('claude-login-submit').disabled=false;$<HTMLButtonElement>('claude-login-close').disabled=false;}
+}
 const recoveryDialog=$<HTMLDialogElement>('recovery-dialog');
 $('recovery-close').addEventListener('click',()=>recoveryDialog.close());
 $('show-recovery').addEventListener('click',()=>{void api('/api/recovery').then(data=>{$<HTMLInputElement>('recovery-value').value=data.token;$('recovery-submit').hidden=true;recoveryDialog.showModal();}).catch(error=>notice(error.message,true));});
@@ -236,7 +269,7 @@ function connect(id:string){
   candidate.onmessage=event=>{if(localGeneration!==generation)return;lastMessage=Date.now();try{const message=JSON.parse(event.data);received=true;if(message.type!=='pong')receive(message,id,localGeneration);}catch{candidate.close(1002,'Invalid stream response');}};
   candidate.onclose=()=>{if(localGeneration!==generation)return;clearTimeout(socketTimeout);offline();clearInterval(heartbeat);if(closing||!activeId)return;if(!opened||!received||stalled){httpFallback=true;transport='http';connect(id);}else reconnectTimer=setTimeout(()=>connect(id),1200);};
 }
-async function refresh(){const state=await api('/api/state');assetLoader.setScope(state.assetCacheScope??'');containerProfile=state.deviceProfile;applyMirrorScale();containerEnvironment=state.containerEnvironment;$<HTMLButtonElement>('device-profile').disabled=!containerProfile;fixtureUrl=state.fixtureUrl;preferredUrl=state.defaultUrl??fixtureUrl;transport=httpFallback?'http':state.transport??'websocket';$('mode').textContent=state.mode==='demo'?'受控测试模式':'云端浏览 · 就绪';if(state.mode==='development'){$('demo').textContent='打开目标网页 →';if(!activeId&&!address.value)address.value=preferredUrl;}$('saved-panel').hidden=!state.capabilities?.persistentLogin;const saved=$<HTMLSelectElement>('saved-browsers');saved.replaceChildren();for(const browser of state.savedSessions??[]){const option=document.createElement('option');option.value=browser.id;option.textContent=browser.title;saved.append(option);} const select=$<HTMLSelectElement>('sessions');select.replaceChildren();for(const session of state.sessions){const option=document.createElement('option');option.value=session.id;option.textContent=session.title;select.append(option);}select.value=activeId;return state;}
+async function refresh(){const state=await api('/api/state');$('claude-login-open').hidden=!state.capabilities?.claudeSessionLogin;$('claude-login-floating').hidden=!state.capabilities?.claudeSessionLogin;assetLoader.setScope(state.assetCacheScope??'');containerProfile=state.deviceProfile;applyMirrorScale();containerEnvironment=state.containerEnvironment;$<HTMLButtonElement>('device-profile').disabled=!containerProfile;fixtureUrl=state.fixtureUrl;preferredUrl=state.defaultUrl??fixtureUrl;transport=httpFallback?'http':state.transport??'websocket';$('mode').textContent=state.mode==='demo'?'受控测试模式':'云端浏览 · 就绪';if(state.mode==='development'){$('demo').textContent='打开目标网页 →';if(!activeId&&!address.value)address.value=preferredUrl;}$('saved-panel').hidden=!state.capabilities?.persistentLogin;const saved=$<HTMLSelectElement>('saved-browsers');saved.replaceChildren();for(const browser of state.savedSessions??[]){const option=document.createElement('option');option.value=browser.id;option.textContent=browser.title;saved.append(option);} const select=$<HTMLSelectElement>('sessions');select.replaceChildren();for(const session of state.sessions){const option=document.createElement('option');option.value=session.id;option.textContent=session.title;select.append(option);}select.value=activeId;return state;}
 function normalizeAddress(){const value=address.value.trim();if(value&&!/^[a-z][a-z0-9+.-]*:/i.test(value))address.value='https://'+value;}
 async function create(){
  normalizeAddress();
