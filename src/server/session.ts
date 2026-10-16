@@ -1,3 +1,4 @@
+import {watchNetworkDiagnostics} from './network-diagnostics.js';
 import {Diagnostics,diagnosticTarget,diagnosticCookies,diagnosticSetCookies} from './diagnostics.js';
 import {randomUUID,createHash} from 'node:crypto';
 import {readFile,stat} from 'node:fs/promises';
@@ -100,10 +101,10 @@ export class RemoteSession {
     const capture=new FrameCapture(page,cdp,this.captureSource,this.svgSources);
     this.windows.set(id,{page,cdp,capture,title:''});
     this.watchDialogs(page);
-    cdp.on('Network.responseReceivedExtraInfo',event=>{if(!this.diagnostics.active)return;for(const blocked of event.blockedCookies??[]){const name=blocked.cookie?.name??blocked.cookieLine.split('=',1)[0];if(name==='cf_clearance'||name==='__cf_bm')this.diagnostics.add('cookie-rejected',{window:id,cookie:name,reasons:blocked.blockedReasons});}});
+    watchNetworkDiagnostics(cdp,this.diagnostics,id);
     if(this.diagnostics.active)await cdp.send('Network.enable');
     const requestIds=new WeakMap<object,{id:number;at:number}>();let requestCounter=0;
-    page.on('request',request=>{if(!this.diagnostics.active)return;const info={id:++requestCounter,at:performance.now()};requestIds.set(request,info);this.diagnostics.add('request',{window:id,request:info.id,method:request.method(),resource:request.resourceType(),...diagnosticTarget(request.url()),redirect:!!request.redirectedFrom()});void request.allHeaders().then(headers=>this.diagnostics.add('request-cookies',{window:id,request:info.id,...diagnosticCookies(headers.cookie)})).catch(()=>{});});
+    page.on('request',request=>{if(!this.diagnostics.active)return;const info={id:++requestCounter,at:performance.now()};requestIds.set(request,info);this.diagnostics.add('request',{window:id,request:info.id,method:request.method(),resource:request.resourceType(),...diagnosticTarget(request.url()),redirect:!!request.redirectedFrom()});void request.allHeaders().then(headers=>this.diagnostics.add('request-cookies',{source:'playwright-observed-not-authoritative',window:id,request:info.id,...diagnosticCookies(headers.cookie)})).catch(()=>{});});
     page.on('response',response=>{if(!this.diagnostics.active)return;const info=requestIds.get(response.request());const headers=response.headers();this.diagnostics.add('response',{window:id,request:info?.id,status:response.status(),ms:info?Math.round(performance.now()-info.at):undefined,...diagnosticTarget(response.url()),challenge:headers['cf-mitigated']==='challenge',ray:/^[a-zA-Z0-9-]{1,80}$/.test(headers['cf-ray']??'')?headers['cf-ray']:undefined});void response.headersArray().then(headers=>this.diagnostics.add('response-cookies',{window:id,request:info?.id,...diagnosticSetCookies(headers)})).catch(()=>{});});
     page.on('requestfailed',request=>{const info=requestIds.get(request);const failure=request.failure()?.errorText??'';this.diagnostics.add('request-failed',{window:id,request:info?.id,...diagnosticTarget(request.url()),reason:failure.match(/net::ERR_[A-Z_]+/)?.[0]??'failed'});});
     page.on('framenavigated',frame=>this.diagnostics.add('navigation',{window:id,main:frame===page.mainFrame(),...diagnosticTarget(frame.url())}));

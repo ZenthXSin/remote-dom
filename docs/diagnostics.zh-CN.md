@@ -15,3 +15,7 @@
 Cookie 出现在 Set-Cookie 中不等于浏览器已接受，也不意味着服务器认可它；请求携带状态和拒收原因应结合判断。Cloudflare PAT 请求返回 401 也不能单独当作验证失败结论。IPv6-only 探测域名的连接失败需要与同一代理上的普通 IPv6 目标对照，不能仅凭它断定验证循环的唯一原因。
 
 私有代理档案可由运维设置 `ipv4Only: true` 进行 IPv4 对照测试。中继通过原代理查询目标 DNS，校验目标公网地址后，将 HTTPS CONNECT 目标固定为 A 记录地址；TLS 数据仍透传，保留浏览器原来的 SNI 和证书校验。HTTP 请求固定 IPv4 目标并保留原 Host。没有公网 A 记录时拒绝连接，绝不回退直连。新建的对应浏览器和中继容器也禁用内核 IPv6。该选项默认关闭，不代表能消除第三方验证；部分上游代理可能不支持以 IP 为 CONNECT 目标。
+
+版本 3 修正分区 Cookie 的观测误差：Playwright `request.allHeaders()` 在实际环境中可能漏报已经发送的 CHIPS Cookie，不能再据此断定 Cookie 丢失。`request-cookies` 事件现明确标注非权威观测来源。优先使用 `network-cookies`（Chromium `Network.requestWillBeSentExtraInfo`）判断实际发送情况；通过 window 与 networkId 关联 `network-request` 和 `network-response`。重定向可能复用 networkId，应按同一编号的事件顺序对应跳转。新增 Cookie 域名、分区标记、SameSite 和阻止原因，不记录值；Cookie 路径仍只保存哈希。没有额外事件时不推断发送或未发送。
+
+回归测试由本地 HTTP 服务直接检查收到的 Cookie，覆盖分区 Cookie、302 跳转和 POST 请求，并分别验证启用与禁用请求拦截的情况；诊断日志不得泄漏测试 Cookie 值。

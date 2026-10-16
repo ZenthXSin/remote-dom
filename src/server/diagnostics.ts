@@ -8,7 +8,7 @@ export class Diagnostics {
  start(){clearTimeout(this.timer);this.entries=[];this.dropped=0;this.started=new Date().toISOString();this.stopped=undefined;this.timer=setTimeout(()=>this.stop(),5*60*1000);this.timer.unref();this.add('recording-start');}
  add(kind:string,data:Record<string,unknown>={}){if(!this.active)return;if(this.entries.length>=3000){this.dropped++;return;}this.entries.push({at:new Date().toISOString(),kind,...data});}
  stop(){if(this.active){this.add('recording-stop');clearTimeout(this.timer);this.timer=undefined;this.stopped=new Date().toISOString();this.onStop();}return this.report();}
- report(){return {schema:2,active:this.active,started:this.started,stopped:this.stopped,dropped:this.dropped,limits:{seconds:300,entries:3000},events:this.entries};}
+ report(){return {schema:3,active:this.active,started:this.started,stopped:this.stopped,dropped:this.dropped,limits:{seconds:300,entries:3000},events:this.entries};}
  clear(){clearTimeout(this.timer);this.timer=undefined;this.entries=[];}
 }
 
