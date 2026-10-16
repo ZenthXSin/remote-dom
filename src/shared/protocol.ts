@@ -99,6 +99,7 @@ export interface UserEvent {
   dialogId?:string;accept?:boolean;
   clipboard?:boolean;
   clickCount?:number;
+  pointerType?:'mouse'|'touch'|'pen';
   value?:string; key?:string; shift?:boolean; ctrl?:boolean; alt?:boolean; meta?:boolean;
   selectionStart?:number; selectionEnd?:number;
   x?:number; y?:number; width?:number; height?:number;

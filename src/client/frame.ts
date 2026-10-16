@@ -215,7 +215,7 @@ document.addEventListener('click',event=>{
   lastHover={nodeId,x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height};
   pendingHover=undefined;clearTimeout(hoverTimer);
   const button=(event.target as Element)?.closest('button,[role="button"],a');const label=(button?.getAttribute('aria-label')??'')+' '+(button?.textContent??'');
-  emit({action:'click',nodeId,x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height,clickCount:Math.max(1,Math.min(3,event.detail)),ctrl:event.ctrlKey,meta:event.metaKey,shift:event.shiftKey,alt:event.altKey,clipboard:/\bcopy\b|复制|複製/i.test(label)});
+  emit({action:'click',pointerType:event instanceof PointerEvent&&['mouse','touch','pen'].includes(event.pointerType)?event.pointerType as 'mouse'|'touch'|'pen':undefined,nodeId,x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height,clickCount:Math.max(1,Math.min(3,event.detail)),ctrl:event.ctrlKey,meta:event.metaKey,shift:event.shiftKey,alt:event.altKey,clipboard:/\bcopy\b|复制|複製/i.test(label)});
 },true);
 function sameHover(hover:{nodeId:string;x:number;y:number}){return lastHover?.nodeId===hover.nodeId&&Math.abs(lastHover.x-hover.x)<.0001&&Math.abs(lastHover.y-hover.y)<.0001;}
 function sendHover(){if(hoverWaiting||!pendingHover||!epoch)return;const hover=pendingHover;pendingHover=undefined;if(sameHover(hover))return;lastHover=hover;hoverWaiting=emit({action:'hover',...hover});hoverTimer=setTimeout(()=>{hoverWaiting=0;sendHover();},2500);}

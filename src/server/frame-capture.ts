@@ -185,7 +185,7 @@ export class FrameCapture {
     return {...combined,focused,nodes:output,unsupported:[...unsupported],truncated:[...translated.values()].some(d=>d.truncated)};
   }
   route(id?:string){return id?this.routes.get(id):{frame:this.main,localId:''};}
-  async click(route:NodeRoute,x?:number,y?:number,hover=false,modifiers:{ctrl?:boolean;meta?:boolean;shift?:boolean;alt?:boolean;clickCount?:number}={}){
+  async click(route:NodeRoute,x?:number,y?:number,hover=false,modifiers:{ctrl?:boolean;meta?:boolean;shift?:boolean;alt?:boolean;clickCount?:number;pointerType?:'mouse'|'touch'|'pen'}={}){
     const chain:CaptureFrame[]=[];let frame=route.frame;
     while(frame.owner){chain.unshift(frame);frame=frame.owner.frame;}
     if(!hover)for(const child of chain)await this.evaluate(child.owner!.frame,`window.__remoteDom.node(${JSON.stringify(child.owner!.nodeId)})?.scrollIntoView({behavior:'instant',block:'nearest',inline:'nearest'})`);
@@ -196,7 +196,9 @@ export class FrameCapture {
     if(hover){await this.page.mouse.move(position.x,position.y);return;}
     const keys=[modifiers.ctrl||modifiers.meta?'Control':'',modifiers.shift?'Shift':'',modifiers.alt?'Alt':''].filter(Boolean);
     try{for(const key of keys)await this.page.keyboard.down(key);
-      if((modifiers.clickCount??1)>1){
+      if(modifiers.pointerType==='touch'){
+        await this.page.touchscreen.tap(position.x,position.y);
+      }else if((modifiers.clickCount??1)>1){
         // The first click was already forwarded. Dispatch only this second
         // down/up pair with its native count, rather than clicking twice again.
         await this.page.mouse.move(position.x,position.y);await this.page.mouse.down({clickCount:modifiers.clickCount});await this.page.mouse.up({clickCount:modifiers.clickCount});

@@ -247,6 +247,7 @@ export class RemoteSession {
     return !!event&&event.type==='event'&&Number.isSafeInteger(event.eventId)&&event.eventId>0&&typeof event.epoch==='string'
       &&['click','hover','focus','input','key','scroll','viewport','select','navigation','dialog','media','pointer'].includes(event.action)
       &&(event.nodeId===undefined||/^n\d+$/.test(event.nodeId))
+      &&(event.pointerType===undefined||['mouse','touch','pen'].includes(event.pointerType))
       &&(event.clickCount===undefined||Number.isInteger(event.clickCount)&&event.clickCount>=1&&event.clickCount<=3)
       &&(event.value===undefined||typeof event.value==='string'&&event.value.length<=10000);
   }
@@ -282,14 +283,15 @@ export class RemoteSession {
       if(windowFrame)await this.evaluate(`window.scrollTo(${x},${y})`,windowFrame);else await evaluate(`${node}?.scrollTo(${x},${y})`);return;
     }
     if(event.action==='click'||event.action==='hover'){
+      const pointer={...event,pointerType:this.deviceProfile.hasTouch?event.pointerType:undefined};
       if(event.clipboard&&event.action==='click'){
         const origin=new URL(this.page.url()).origin,marker=randomUUID();let ready=false;
         try{await this.context.grantPermissions(['clipboard-read','clipboard-write'],{origin});await this.evaluate(`navigator.clipboard.writeText(${JSON.stringify(marker)})`);ready=true;}catch{}
-        try{await this.capture.click(route,event.x,event.y,false,event);if(ready){for(let attempt=0;attempt<5;attempt++){const text=await this.evaluate('navigator.clipboard.readText()');if(typeof text==='string'&&text!==marker){if(text.length>1024*1024)throw new Error('Clipboard exceeds 1 MiB');return text;}await new Promise(resolve=>setTimeout(resolve,80));}}}
+        try{await this.capture.click(route,event.x,event.y,false,pointer);if(ready){for(let attempt=0;attempt<5;attempt++){const text=await this.evaluate('navigator.clipboard.readText()');if(typeof text==='string'&&text!==marker){if(text.length>1024*1024)throw new Error('Clipboard exceeds 1 MiB');return text;}await new Promise(resolve=>setTimeout(resolve,80));}}}
         finally{await this.context.clearPermissions();await this.context.grantPermissions(['clipboard-write']);}
         return;
       }
-      await this.capture.click(route,event.x,event.y,event.action==='hover',event);return;
+      await this.capture.click(route,event.x,event.y,event.action==='hover',pointer);return;
     }
     if(event.action==='input'){
       const ready=await evaluate(`(()=>{const n=${node};if(n instanceof HTMLElement&&n.isContentEditable){n.focus();const range=document.createRange();range.selectNodeContents(n);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);return true;}if(!(n instanceof HTMLInputElement||n instanceof HTMLTextAreaElement)||n.disabled||n.readOnly)return false;if(n instanceof HTMLInputElement&&!['text','password','email','search','url','tel','number'].includes(n.type))return false;n.focus();n.select();return true;})()`);
