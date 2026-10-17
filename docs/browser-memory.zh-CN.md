@@ -13,3 +13,5 @@ node -e 'console.log(require("node:v8").getHeapStatistics().heap_size_limit / 10
 不同 V8 版本的实际堆上限会包含年轻代开销，可能略大于 512 MiB。不要为追求 200 MiB 的整容器目标强行压低堆上限：复杂 DOM 捕获、Playwright 协议处理和并存页面快照都需要额外工作空间。
 
 `tests/e2e/capture-memory.test.ts` 用真实 Chromium 连续替换 1200 个元素并捕获 300 次，检查旧节点身份释放、最新页面同步、草稿保留及 GC 后内存是否趋于稳定。使用 `node --expose-gc --import tsx --test tests/e2e/capture-memory.test.ts` 运行。该本地负载不能覆盖所有外部网站、长期会话和资源响应；如果仍有增长，需要根据对应负载进一步分析，不能仅凭上调上限判断不存在内存泄漏。
+
+页面有响应但镜像画面停止更新时，还应检查快照大小限制。样式丰富的页面可能在约 2500 个节点时达到 5 MiB；旧版 4 MiB 限制会拒绝这些合法更新。当前捕获上限为 16 MiB，发送积压上限为 32 MiB，并继续保留每连接最多三个未确认更新的流控。捕获失败后的轮询间隔为 1.5 秒，避免每 60 毫秒重复失败；有效快照成功后恢复正常间隔。`large-snapshot.test.ts` 覆盖超过 4 MiB 的真实页面、更新、重连、超过 16 MiB 的拒绝以及随后恢复。

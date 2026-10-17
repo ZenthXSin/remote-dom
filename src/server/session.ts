@@ -26,6 +26,10 @@ import {deviceEmulation} from './device-emulation.js';
 import {isDevicePreset,type DevicePreset} from '../shared/device-presets.js';
 import {ASSET_MIMES,MAX_ASSET_BYTES,fetchAsset,type AssetBody,type AssetSource} from './asset-source.js';
 
+// Complex pages can legitimately exceed 4 MiB in computed styles alone.
+const MAX_SNAPSHOT_BYTES=16*1024*1024;
+const MAX_STREAM_BUFFER_BYTES=2*MAX_SNAPSHOT_BYTES;
+
 export class RemoteSession {
   readonly diagnostics=new Diagnostics(()=>{for(const window of this.windows.values())void window.cdp.send('Network.disable').catch(()=>{});});
   readonly id=randomUUID(); readonly created=Date.now(); lastActivity=Date.now();
@@ -193,7 +197,7 @@ export class RemoteSession {
     }finally{this.deviceSwitchBusy=false;}
   }
   view(){const wasIdle=Date.now()-this.lastViewActivity>=2000;this.lastViewActivity=Date.now();if(wasIdle&&this.timer){clearTimeout(this.timer);this.schedule();}}
-  private schedule(){if(!this.closed)this.timer=setTimeout(()=>{this.timer=undefined;void this.poll().finally(()=>this.schedule());},this.sockets.size||Date.now()-this.lastViewActivity<2000?60:1500);}
+  private schedule(){if(!this.closed)this.timer=setTimeout(()=>{this.timer=undefined;void this.poll().finally(()=>this.schedule());},this.lastError?1500:this.sockets.size||Date.now()-this.lastViewActivity<2000?60:1500);}
   poll(force=false):Promise<void> {
     if(this.pollTask)return this.pollTask;
     const task=this.captureDocument(force);this.pollTask=task;
@@ -213,7 +217,7 @@ export class RemoteSession {
       if(!force&&this.current&&assetState===this.capturedAssetState&&!await this.capture.needsCapture())return;
       const epoch=this.epoch,revision=this.inputRevision,viewport={...this.viewport};
       const captureStart=performance.now();const raw=await this.capture.capture();this.diagnostics.add('capture',{ms:Math.round(performance.now()-captureStart)});if(epoch!==this.epoch)return;
-      if(Buffer.byteLength(JSON.stringify(raw))>4*1024*1024)throw new Error('页面超过当前快照大小限制');
+      if(Buffer.byteLength(JSON.stringify(raw))>MAX_SNAPSHOT_BYTES)throw new Error('页面超过当前快照大小限制');
       const document=sanitizeDocument(raw,url=>this.resource(url));
       this.capturedAssetState=assetState;
       document.inputRevision=revision;document.viewport=viewport;document.devicePreset=this.devicePreset??'default';
@@ -463,7 +467,7 @@ export class RemoteSession {
       if(flow.enabled)flow.waiting.push(cursor);else flow.waiting=[cursor];
       flow.last=current;
     }
-    if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
+    if(socket.bufferedAmount>MAX_STREAM_BUFFER_BYTES){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
   summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,devicePreset:this.devicePreset??'default',persistenceError:this.persistenceError||undefined};}
   async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;await this.pointer.cancel();await this.keyboard.cancel();this.diagnostics.clear();clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});await this.networkGuard?.close();this.networkGuard=undefined;this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
