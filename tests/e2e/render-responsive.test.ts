@@ -5,7 +5,7 @@ import {createApp} from '../../src/server/app.js';
 import {readConfig} from '../../src/server/config.js';
 test('large initial render yields to browser tasks and keeps ordered patches and reset usable',{timeout:30000},async t=>{
  const config=readConfig({...process.env,PORT:'0',ENGINE_MODE:'demo',ENGINE_HOST:'127.0.0.1'}),app=await createApp(config);t.after(()=>app.close());
- const browser=await chromium.launch({executablePath:config.chromiumPath,headless:true,chromiumSandbox:true});t.after(()=>browser.close());const page=await browser.newPage();await page.goto(app.origin+'/mirror');
+ const browser=await chromium.launch({executablePath:config.chromiumPath,headless:true,chromiumSandbox:true});t.after(()=>browser.close());const page=await browser.newPage();await page.addInitScript('window.__name=(value)=>value');await page.goto(app.origin+'/mirror');
  const result=await page.evaluate(async()=>{
   const channel=new MessageChannel();const rendered:number[]=[];let ticks=0,initialTicks=0;const timer=setInterval(()=>ticks++,0);
   const next=(type:string)=>new Promise<any>(resolve=>{const listener=(e:MessageEvent)=>{if(e.data.type===type){channel.port1.removeEventListener('message',listener);resolve(e.data);}};channel.port1.addEventListener('message',listener);});

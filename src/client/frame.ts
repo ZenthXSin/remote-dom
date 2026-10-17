@@ -3,12 +3,15 @@ import {PointerInput} from './pointer-input.js';
 import {MirrorRules} from './rules.js';
 import {collectNodeAssets} from '../shared/assets.js';
 const mount=document.getElementById('mirror-root')!;
+// The authority owns scroll anchoring. Replaying it locally a second time can
+// shift the viewport when delayed fonts, images or DOM patches change layout.
+mount.style.overflowAnchor='none';
 const nodes=new Map<string,Node>();const reverse=new WeakMap<Node,string>();
 const records=new Map<string,MirrorNode>();const assets=new Map<string,string>();
 const properties=new Set<string>(STYLE_PROPERTIES);
 const dirty=new Map<string,number>();let port:MessagePort;let epoch='';let seq=-1;let eventId=0;
 const inputAcks=new Map<number,number>();let inputRevision=-1;let currentRoot='';
-let applying=false,composing=false;let renderWork=Promise.resolve();
+let applying=false,applyVersion=0,composing=false;let renderWork=Promise.resolve();
 function scheduleWork(work:()=>void|Promise<void>){renderWork=renderWork.then(work).catch(()=>port.postMessage({type:'resync'}));}
 function yieldToBrowser(){return new Promise<void>(resolve=>setTimeout(resolve,0));}
 let inputTimer:ReturnType<typeof setTimeout>|undefined;
@@ -100,7 +103,7 @@ async function paintAssets(){
   syncFonts(currentFonts);const changed=[...affected].flatMap(id=>{const record=records.get(id);return record?[record]:[];});if(changed.length&&currentRoot)await applyRecords(changed,[],currentRoot);releaseUnusedAssets();
 }
 async function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
-  applying=true;let sliceStart=performance.now();
+  applying=true;const version=++applyVersion;let sliceStart=performance.now();
   const checkpoint=async()=>{await yieldToBrowser();sliceStart=performance.now();};
   try{
     for(const record of upserts){records.set(record.id,record);indexRecord(record);}
@@ -155,11 +158,14 @@ async function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
     for(const [id,record]of records){if(!record.topLayer)continue;const node=nodes.get(id);if(!(node instanceof HTMLElement)||!node.isConnected)continue;
       try{if(record.topLayer==='modal'&&node instanceof HTMLDialogElement&&!node.matches(':modal')){node.removeAttribute('open');node.showModal();}else if(record.topLayer==='popover'&&!node.matches(':popover-open'))node.showPopover();}catch{}
     }
-    for(const record of upserts){const node=nodes.get(record.id);if(node instanceof HTMLElement&&!ownsScroll(record.id,record.scrollLeft??0,record.scrollTop??0)){
+    // A child patch can temporarily clamp an unchanged ancestor scroller.
+    // Restore its authoritative offset even when the ancestor was not upserted.
+    const updatedIds=new Set(upserts.map(record=>record.id));
+    for(const record of records.values()){if(!updatedIds.has(record.id)&&!record.scrollLeft&&!record.scrollTop)continue;const node=nodes.get(record.id);if(node instanceof HTMLElement&&!ownsScroll(record.id,record.scrollLeft??0,record.scrollTop??0)){
       const x=record.scrollLeft??node.scrollLeft,y=record.scrollTop??node.scrollTop;
       if(Math.abs(node.scrollTop-y)>1||Math.abs(node.scrollLeft-x)>1){expectedScrolls.set(record.id,{x,y,at:performance.now()});node.scrollTo(x,y);}
     }if(node instanceof HTMLSelectElement&&record.selectedIndex!==undefined&&!dirty.has(record.id))node.selectedIndex=record.selectedIndex;}
-  }finally{requestAnimationFrame(()=>{applying=false;});}
+  }finally{requestAnimationFrame(()=>{if(applyVersion===version)applying=false;});}
 }
 async function update(message:(Snapshot|Patch)&{renderToken?:number}){
   bodyScrollsWindow=message.bodyScrollsWindow===true;
@@ -265,12 +271,16 @@ function flushScroll(){
   for(const scroll of pendingScrolls.values())emit({action:'scroll',...scroll});
   pendingScrolls.clear();
 }
-for(const event of ['wheel','touchstart','touchmove','touchend'])document.addEventListener(event,()=>{gestureUntil=performance.now()+300;},{passive:true,capture:true});
+for(const event of ['wheel','touchstart','touchmove','touchend','pointerdown','pointerup','keydown'])document.addEventListener(event,()=>{gestureUntil=performance.now()+300;},{passive:true,capture:true});
+document.addEventListener('pointermove',event=>{if(event.buttons)gestureUntil=performance.now()+300;},{passive:true,capture:true});
 document.addEventListener('scroll',event=>{
   const node=event.target instanceof HTMLElement?event.target:undefined;
   const x=node?.scrollLeft??window.scrollX,y=node?.scrollTop??window.scrollY;
   const key=scrollKey(node);const expected=expectedScrolls.get(key);
   if(expected&&performance.now()-expected.at<700&&Math.abs(expected.x-x)<2&&Math.abs(expected.y-y)<2){expectedScrolls.delete(key);return;}
+  // Layout can clamp scroll offsets between asynchronous render slices. This
+  // is not user input, and forwarding it creates a persistent remote jump.
+  if(applying&&performance.now()>=gestureUntil)return;
   scrollIntents.set(key,{x,y,at:performance.now()});
   pendingScrolls.set(key,{nodeId:node?reverse.get(node):undefined,x:node?x:x/zoom,y:node?y:y/zoom});
   if(!scrollTimer)scrollTimer=setTimeout(flushScroll,45);
