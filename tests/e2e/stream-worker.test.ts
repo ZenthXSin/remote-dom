@@ -51,3 +51,15 @@ test('continuous typing syncs before a pause and composition stays local until c
  assert.equal(await session.page.getByPlaceholder('在这里输入中文').inputValue(),before);await input.evaluate(e=>e.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:'拼音未确认'})));
  await session.page.waitForFunction(()=>document.querySelector<HTMLTextAreaElement>('textarea[placeholder="在这里输入中文"]')?.value==='拼音未确认');
 });
+
+test('slow input acknowledgements coalesce typing instead of replaying a long stale queue',{timeout:30000},async t=>{
+ const config=readConfig({...process.env,PORT:'0',ENGINE_MODE:'demo',ENGINE_HOST:'127.0.0.1'}),app=await createApp(config);t.after(()=>app.close());
+ const browser=await chromium.launch({executablePath:config.chromiumPath,headless:true,chromiumSandbox:true});t.after(()=>browser.close());const page=await browser.newPage();await page.goto(app.origin);await page.locator('#demo').click();
+ const input=page.frameLocator('#mirror').getByPlaceholder('在这里输入中文');await input.waitFor();const session=[...app.sessions.values()][0];
+ const original=session.submit.bind(session);let count=0;
+ session.submit=async(event,peer,capture)=>{if(event.action==='input'){count++;await new Promise(r=>setTimeout(r,220));}return original(event,peer,capture);};
+ await input.evaluate(e=>{let n=0;(window as any).typing=setInterval(()=>{(e as HTMLTextAreaElement).value='latest '+ ++n;e.dispatchEvent(new Event('input',{bubbles:true}));},12);});
+ await page.waitForTimeout(650);await input.evaluate(e=>{clearInterval((window as any).typing);(e as HTMLTextAreaElement).value='final text';e.dispatchEvent(new Event('input',{bubbles:true}));});
+ await session.page.waitForFunction(()=>document.querySelector<HTMLTextAreaElement>('textarea')?.value==='final text');
+ assert.ok(count<=5,`expected bounded input work, received ${count}`);assert.equal(await input.inputValue(),'final text');
+});

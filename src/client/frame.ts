@@ -7,6 +7,7 @@ const mount=document.getElementById('mirror-root')!;
 // shift the viewport when delayed fonts, images or DOM patches change layout.
 mount.style.overflowAnchor='none';
 const nodes=new Map<string,Node>();const reverse=new WeakMap<Node,string>();
+const appliedStyles=new WeakMap<Element,{style:Record<string,string>|undefined;assetVersion:number;bodyScroll:boolean}>();
 const records=new Map<string,MirrorNode>();const assets=new Map<string,string>();
 const properties=new Set<string>(STYLE_PROPERTIES);
 const dirty=new Map<string,number>();let port:MessagePort;let epoch='';let seq=-1;let eventId=0;
@@ -16,6 +17,7 @@ function scheduleWork(work:()=>void|Promise<void>){renderWork=renderWork.then(wo
 function yieldToBrowser(){return new Promise<void>(resolve=>setTimeout(resolve,0));}
 let inputTimer:ReturnType<typeof setTimeout>|undefined;
 let pendingInput:HTMLElement|undefined;
+let inputFlight:number|undefined;
 const editableIntents=new Map<string,{value:string;at:number;eventId:number}>();
 const fontFaces=new Map<string,FontFace>();
 let currentFonts:NonNullable<Snapshot['fontFaces']>=[];
@@ -52,7 +54,7 @@ function ownsScroll(key:string,x:number,y:number){
   if(Math.abs(intent.x-x)<2&&Math.abs(intent.y-y)<2&&performance.now()-intent.at>160){scrollIntents.delete(key);return false;}
   return true;
 }
-function reset(clearAssets=false){releaseKeys();clearTimeout(scrollTimer);scrollTimer=undefined;pendingScrolls.clear();clearTimeout(inputTimer);clearTimeout(hoverTimer);if(assetPaint!==undefined)cancelAnimationFrame(assetPaint);assetPaint=undefined;pendingAssets.clear();assetNodes.clear();nodeAssets.clear();mirrorRules.clear();for(const face of fontFaces.values())document.fonts.delete(face);fontFaces.clear();currentFonts=[];pendingInput=undefined;pendingHover=undefined;lastHover=undefined;hoverWaiting=0;pointerInput.reset();composing=false;mount.replaceChildren();nodes.clear();records.clear();dirty.clear();inputAcks.clear();inputRevision=-1;currentRoot='';editableIntents.clear();scrollIntents.clear();expectedScrolls.clear();epoch='';seq=-1;if(clearAssets){for(const url of assets.values())URL.revokeObjectURL(url);assets.clear();}}
+function reset(clearAssets=false){releaseKeys();clearTimeout(scrollTimer);scrollTimer=undefined;pendingScrolls.clear();clearTimeout(inputTimer);clearTimeout(hoverTimer);if(assetPaint!==undefined)cancelAnimationFrame(assetPaint);assetPaint=undefined;pendingAssets.clear();assetNodes.clear();nodeAssets.clear();mirrorRules.clear();for(const face of fontFaces.values())document.fonts.delete(face);fontFaces.clear();currentFonts=[];pendingInput=undefined;inputFlight=undefined;pendingHover=undefined;lastHover=undefined;hoverWaiting=0;pointerInput.reset();composing=false;mount.replaceChildren();nodes.clear();records.clear();dirty.clear();inputAcks.clear();inputRevision=-1;currentRoot='';editableIntents.clear();scrollIntents.clear();expectedScrolls.clear();epoch='';seq=-1;if(clearAssets){for(const url of assets.values())URL.revokeObjectURL(url);assets.clear();}}
 function emit(event:Omit<UserEvent,'type'|'epoch'|'eventId'>){if(!epoch)return 0;const id=++eventId;port.postMessage({type:'event',epoch,eventId:id,...event});return id;}
 function retireInputs(){const released:string[]=[];for(const [id,sent]of dirty){const revision=inputAcks.get(sent);if(revision!==undefined&&inputRevision>=revision){dirty.delete(id);editableIntents.delete(id);inputAcks.delete(sent);released.push(id);}}const pending=new Set(dirty.values());for(const event of inputAcks.keys())if(!pending.has(event))inputAcks.delete(event);return released;}
 function idFor(target:EventTarget|null){let n=target as Node|null;while(n&&!reverse.has(n))n=n.parentNode;return n?reverse.get(n):undefined;}
@@ -68,7 +70,7 @@ function input(){
     const offset=(node:Node,offset:number)=>{const range=document.createRange();range.selectNodeContents(target);range.setEnd(node,offset);return range.toString().length;};
     start=offset(selection.anchorNode,selection.anchorOffset);end=offset(selection.focusNode,selection.focusOffset);if(start>end)[start,end]=[end,start];
   }}
-  const sent=emit({action:'input',nodeId:id,value,selectionStart:start,selectionEnd:end});dirty.set(id,sent);
+  const sent=emit({action:'input',nodeId:id,value,selectionStart:start,selectionEnd:end});inputFlight=sent;dirty.set(id,sent);
   if(target.isContentEditable)editableIntents.set(id,{value,at:performance.now(),eventId:sent});
 }
 function resolveValue(value:string){
@@ -102,6 +104,11 @@ async function paintAssets(){
   assetPaint=undefined;const affected=new Set<string>();for(const id of pendingAssets)for(const node of assetNodes.get(id)??[])affected.add(node);pendingAssets.clear();
   syncFonts(currentFonts);const changed=[...affected].flatMap(id=>{const record=records.get(id);return record?[record]:[];});if(changed.length&&currentRoot)await applyRecords(changed,[],currentRoot);releaseUnusedAssets();
 }
+function sameStyle(a:Record<string,string>|undefined,b:Record<string,string>|undefined){
+  if(a===b)return true;
+  const left=a??{},right=b??{},keys=Object.keys(left);
+  return keys.length===Object.keys(right).length&&keys.every(key=>left[key]===right[key]);
+}
 async function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
   applying=true;const version=++applyVersion;let sliceStart=performance.now();
   const checkpoint=async()=>{await yieldToBrowser();sliceStart=performance.now();};
@@ -132,9 +139,14 @@ async function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
       if(record.editable&&node instanceof HTMLElement)wanted.set('contenteditable','plaintext-only');
       for(const attr of Array.from(node.attributes))if(attr.name!=='style'&&attr.name!=='src'&&!wanted.has(attr.name))node.removeAttribute(attr.name);
       for(const [key,value]of wanted)if(node.getAttribute(key)!==value)node.setAttribute(key,value);
-      const styles={...STYLE_DEFAULTS,...record.style};if(record.id===root&&bodyScrollsWindow){styles['overflow-x']='visible';styles['overflow-y']='visible';}
-      for(const key of Array.from(node.style))if(!(key in styles))node.style.removeProperty(key);
-      for(const [key,value]of Object.entries(styles)){if(!properties.has(key))continue;const safe=resolveValue(value);if(safe!==undefined){if(node.style.getPropertyValue(key)!==safe)node.style.setProperty(key,safe);}else node.style.removeProperty(key);}
+      const cached=appliedStyles.get(node),bodyScroll=record.id===root&&bodyScrollsWindow;
+      const unchanged=cached&&cached.assetVersion===assetVersion&&cached.bodyScroll===bodyScroll&&sameStyle(cached.style,record.style);
+      if(!unchanged){
+        const styles={...STYLE_DEFAULTS,...record.style};if(record.id===root&&bodyScrollsWindow){styles['overflow-x']='visible';styles['overflow-y']='visible';}
+        for(const key of Array.from(node.style))if(!(key in styles))node.style.removeProperty(key);
+        for(const [key,value]of Object.entries(styles)){if(!properties.has(key))continue;const safe=resolveValue(value);if(safe!==undefined){if(node.style.getPropertyValue(key)!==safe)node.style.setProperty(key,safe);}else node.style.removeProperty(key);}
+        appliedStyles.set(node,{style:record.style,assetVersion,bodyScroll});
+      }
       if(node instanceof HTMLImageElement){const id=record.assetUrl?.match(/^asset:([a-f0-9-]+)$/)?.[1];const url=id?assets.get(id):undefined;if(url&&node.src!==url)node.src=url;else if(!url)node.removeAttribute('src');}
       if(node instanceof HTMLMediaElement&&record.media&&!dirty.has(record.id)){
         const media=record.media,id=record.assetUrl?.match(/^asset:([a-f0-9-]+)$/)?.[1],url=id?assets.get(id):undefined;
@@ -193,8 +205,9 @@ window.addEventListener('message',event=>{
   port=event.ports[0];port.onmessage=event=>{const message=event.data;
     // Accept control metadata between render slices. DOM reconciliation still
     // stays ordered, so acknowledgements cannot overwrite newer local typing.
-    if(message.type==='input-reset'){pointerInput.reset();releaseKeys();pendingHover=undefined;clearTimeout(hoverTimer);return;}
+    if(message.type==='input-reset'){inputFlight=undefined;clearTimeout(inputTimer);inputTimer=undefined;pointerInput.reset();releaseKeys();pendingHover=undefined;clearTimeout(hoverTimer);return;}
     if(message.type==='ack'||message.type==='error'){
+      if(inputFlight===message.eventId){inputFlight=undefined;if(pendingInput&&!composing&&!inputTimer)inputTimer=setTimeout(input,0);}
       if(message.type==='error')lastHover=undefined;
       if(hoverWaiting===message.eventId){hoverWaiting=0;clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}
       if(message.type==='ack'&&message.inputRevision!==undefined&&[...dirty.values()].includes(message.eventId))inputAcks.set(message.eventId,message.inputRevision);
@@ -238,10 +251,10 @@ document.addEventListener('compositionstart',()=>{composing=true;clearTimeout(in
 document.addEventListener('compositionend',event=>{composing=false;const target=editableTarget(event.target)??event.target;if(target instanceof HTMLElement&&(target.isContentEditable||target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement)){pendingInput=target;input();}});
 document.addEventListener('input',event=>{
   const target=editableTarget(event.target)??event.target;if(!(target instanceof HTMLElement)||(!(target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement)&&!target.isContentEditable)||(target instanceof HTMLInputElement&&!['text','password','email','search','url','tel','number'].includes(target.type)))return;
-  const id=reverse.get(target);if(!id)return;dirty.set(id,Number.MAX_SAFE_INTEGER);pendingInput=target;if(!composing&&!inputTimer)inputTimer=setTimeout(input,16);
+  const id=reverse.get(target);if(!id)return;dirty.set(id,Number.MAX_SAFE_INTEGER);pendingInput=target;if(!composing&&!inputTimer&&inputFlight===undefined)inputTimer=setTimeout(input,16);
 });
 document.addEventListener('focusout',event=>{if(editableTarget(event.target))setTimeout(()=>port.postMessage({type:'resync'}),0);});
-function selectControl(event:Event){const target=event.target;if(target instanceof HTMLSelectElement||target instanceof HTMLInputElement&&['range','color','date','time','datetime-local','month','week'].includes(target.type)){const id=reverse.get(target);if(id)dirty.set(id,emit({action:'select',nodeId:id,value:target.value}));}}
+function selectControl(event:Event){input();const target=event.target;if(target instanceof HTMLSelectElement||target instanceof HTMLInputElement&&['range','color','date','time','datetime-local','month','week'].includes(target.type)){const id=reverse.get(target);if(id)dirty.set(id,emit({action:'select',nodeId:id,value:target.value}));}}
 document.addEventListener('change',selectControl);document.addEventListener('input',event=>{if(event.target instanceof HTMLInputElement&&event.target.type==='range')selectControl(event);});
 const heldKeys=new Map<string,{key:string}>();
 function releaseKeys(){if(heldKeys.size)emit({action:'key',keyPhase:'cancel'});heldKeys.clear();}
