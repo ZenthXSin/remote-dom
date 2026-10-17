@@ -32,6 +32,15 @@ export function safeStyle(property:string,value:string,resource:(url:string)=>st
   return result;
 }
 export function sanitizeDocument(raw:CapturedDocument,resource:(url:string)=>string|undefined):CapturedDocument {
+  // Packed captures share declarations. Validate each once within this document;
+  // never reuse URL mappings across captures or account sessions.
+  const declarations=new WeakMap<Record<string,string>,Record<string,string>>();
+  const sanitizeStyle=(source:Record<string,string>|undefined)=>{
+    if(source&&declarations.has(source))return declarations.get(source)!;
+    const style:Record<string,string>={};
+    for(const [key,value]of Object.entries(source??{})){const filtered=safeStyle(key,String(value),resource);if(filtered!==undefined)style[key]=filtered;}
+    if(source)declarations.set(source,style);return style;
+  };
   const nodes:MirrorNode[]=[];
   const seen=new Set<string>();
   const unsupported=new Set(raw.unsupported);
@@ -46,14 +55,12 @@ export function sanitizeDocument(raw:CapturedDocument,resource:(url:string)=>str
     if(svg)for(const [key,value]of Object.entries(n.attrs??{})){const safe=safeSvgAttribute(key,String(value));if(safe!==undefined)attrs[key]=safe;}
     if(tag==='a'){attrs.role='link';attrs.tabindex=attrs.tabindex??'0';}
     if(tag==='input'&&attrs.type&&!['text','password','email','search','url','tel','number','checkbox','radio','submit','button','reset','range','date','time','datetime-local','month','week','color','file'].includes(attrs.type))attrs.type='text';
-    const style:Record<string,string>={};
-    for(const [key,value]of Object.entries(n.style??{})){const filtered=safeStyle(key,String(value),resource);if(filtered!==undefined)style[key]=filtered;}
+    const style=sanitizeStyle(n.style);
     const node:MirrorNode={id:n.id,kind:'element',tag,namespace:svg?'svg':undefined,attrs,style,children:(n.children??[]).filter(id=>/^n\d+$/.test(id))};
     if(!svg&&(n.topLayer==='popover'||n.topLayer==='modal'&&tag==='dialog')){
-      node.topLayer=n.topLayer;node.backdropStyle={};
-      for(const [key,value]of Object.entries(n.backdropStyle??{})){const filtered=safeStyle(key,String(value),resource);if(filtered!==undefined)node.backdropStyle[key]=filtered;}
+      node.topLayer=n.topLayer;node.backdropStyle=sanitizeStyle(n.backdropStyle);
     }
-    if(n.pseudoStyles){node.pseudoStyles={};for(const pseudo of ['before','after','placeholder'] as const){const source=n.pseudoStyles[pseudo];if(!source)continue;const declaration:Record<string,string>={};for(const [key,value]of Object.entries(source)){const filtered=safeStyle(key,String(value),resource);if(filtered!==undefined)declaration[key]=filtered;}node.pseudoStyles[pseudo]=declaration;}}
+    if(n.pseudoStyles){node.pseudoStyles={};for(const pseudo of ['before','after','placeholder'] as const){const source=n.pseudoStyles[pseudo];if(!source)continue;node.pseudoStyles[pseudo]=sanitizeStyle(source);}}
     if(n.editable===true&&!svg){node.editable=true;node.editableValue=String(n.editableValue??'').slice(0,10000);}
     if(n.assetUrl){const id=resource(n.assetUrl);if(id)node.assetUrl=`asset:${id}`;}
     if(['audio','video'].includes(tag)&&style.display==='none')node.tag='div';

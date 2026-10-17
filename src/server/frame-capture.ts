@@ -1,3 +1,4 @@
+import {unpackCapture} from '../shared/capture-codec.js';
 import {createHash} from 'node:crypto';
 import type {Page,Frame,CDPSession} from 'playwright-core';
 import type {CapturedDocument,MirrorNode} from '../shared/protocol.js';
@@ -138,7 +139,7 @@ export class FrameCapture {
         }
         let registered=this.svgContexts.get(frame);if(!registered){registered=new Map();this.svgContexts.set(frame,registered);}
         for(const [url,source]of this.svgSources)if(registered.get(url)!==source){await this.evaluate(frame,`window.__remoteDom.svg(${JSON.stringify(url)},${JSON.stringify(source)})`);registered.set(url,source);}
-        const {state,document:raw}=await this.evaluate(frame,'({state:window.__remoteDom.activity(),document:window.__remoteDom.capture()})');if(raw?.root){documents.set(frame.id,raw);this.activity.set(frame,{context:frame.context!,revision:state.revision});}
+        const {state,document:packed}=await this.evaluate(frame,'({state:window.__remoteDom.activity(),document:window.__remoteDom.capturePacked()})');const raw=unpackCapture(packed);if(raw?.root){documents.set(frame.id,raw);this.activity.set(frame,{context:frame.context!,revision:state.revision});}
       }
       catch(error){this.diagnostics.push({operation:'capture',error:error instanceof Error?error.message.slice(0,200):'unknown'});frame.context=undefined;if(frame===this.main)throw new Error('Main capture temporarily unavailable');}
     }

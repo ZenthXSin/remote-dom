@@ -1,5 +1,6 @@
+import {packCapture,type PackedCapture} from '../shared/capture-codec.js';
 import {STYLE_DEFAULTS,STYLE_PROPERTIES,SAFE_ATTRS,SAFE_TAGS,SVG_TAGS,SVG_ATTRS,type CapturedDocument,type MirrorNode} from '../shared/protocol.js';
-declare global {interface Window {__remoteDom:{capture:()=>CapturedDocument;activity:()=>{revision:number;paint:boolean};dispose:()=>void;node:(id:string)=>Node|undefined;idFor:(node:Node)=>string;svg:(url:string,source:string)=>void;shadow:(host:Element,root:ShadowRoot)=>void}}}
+declare global {interface Window {__remoteDom:{capture:()=>CapturedDocument;capturePacked:()=>PackedCapture;activity:()=>{revision:number;paint:boolean};dispose:()=>void;node:(id:string)=>Node|undefined;idFor:(node:Node)=>string;svg:(url:string,source:string)=>void;shadow:(host:Element,root:ShadowRoot)=>void}}}
 window.__remoteDom?.dispose?.();
 let activityRevision=0,continuousPaint=false,controlState='';
 const observers:MutationObserver[]=[];const observed=new WeakSet<Node>();const roots:(Document|ShadowRoot)[]=[];
@@ -26,6 +27,7 @@ const skipped=new Set(['script','style','link','meta','base','noscript','templat
 const unsupportedTags=new Set(['iframe','canvas','video','audio','object','embed']);
 
 window.__remoteDom={
+  capturePacked:()=>packCapture(window.__remoteDom.capture()),
   idFor,
   activity:()=>{
     releaseDetachedRoots();
