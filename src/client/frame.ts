@@ -14,7 +14,10 @@ const dirty=new Map<string,number>();let port:MessagePort;let epoch='';let seq=-
 const inputAcks=new Map<number,number>();let inputRevision=-1;let currentRoot='';
 let applying=false,applyVersion=0,composing=false;let renderWork=Promise.resolve();
 function scheduleWork(work:()=>void|Promise<void>){renderWork=renderWork.then(work).catch(()=>port.postMessage({type:'resync'}));}
-function yieldToBrowser(){return new Promise<void>(resolve=>setTimeout(resolve,0));}
+function yieldToBrowser(){
+  const scheduler=(globalThis as unknown as {scheduler?:{yield?:()=>Promise<void>}}).scheduler;
+  return scheduler?.yield?scheduler.yield():new Promise<void>(resolve=>setTimeout(resolve,0));
+}
 let inputTimer:ReturnType<typeof setTimeout>|undefined;
 let pendingInput:HTMLElement|undefined;
 let inputFlight:number|undefined;
@@ -111,17 +114,22 @@ function sameStyle(a:Record<string,string>|undefined,b:Record<string,string>|und
 }
 async function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
   applying=true;const version=++applyVersion;let sliceStart=performance.now();
-  const checkpoint=async()=>{await yieldToBrowser();sliceStart=performance.now();};
+  const protectedNodes=new Set<string>();
+  const protect=(id:string)=>{if(protectedNodes.has(id))return;protectedNodes.add(id);for(const child of records.get(id)?.children??[])protect(child);};
+  let active:HTMLElement|undefined,activeId:string|undefined;
+  const protectEditing=()=>{
+    for(const id of editableIntents.keys())if(dirty.has(id))protect(id);
+    active=editableTarget(document.activeElement);activeId=active?reverse.get(active):undefined;
+    if(activeId&&(composing||dirty.has(activeId)))protect(activeId);
+  };
+  const checkpoint=async()=>{await yieldToBrowser();protectEditing();sliceStart=performance.now();};
   try{
-    for(const record of upserts){records.set(record.id,record);indexRecord(record);}
-    const protectedNodes=new Set<string>();
-    const protect=(id:string)=>{if(protectedNodes.has(id))return;protectedNodes.add(id);for(const child of records.get(id)?.children??[])protect(child);};
+    for(const record of upserts){if(performance.now()-sliceStart>8)await checkpoint();records.set(record.id,record);indexRecord(record);}
     for(const [id,intent]of editableIntents){if(!dirty.has(id)||performance.now()-intent.at>10000){editableIntents.delete(id);dirty.delete(id);}else protect(id);}
     // Keep the local caret and IME text while focused; native remote input still
     // updates the authoritative editor and all surrounding UI.
-    const active=editableTarget(document.activeElement);const activeId=active?reverse.get(active):undefined;
-    if(activeId&&(composing||dirty.has(activeId)))protect(activeId);
-    for(const id of remove){const node=nodes.get(id);if(!(activeId&&protectedNodes.has(activeId)&&node&&active?.contains(node)))node?.parentNode?.removeChild(node);nodes.delete(id);records.delete(id);dirty.delete(id);unindexAssets(id);mirrorRules.remove(id);}
+    protectEditing();
+    for(const id of remove){if(performance.now()-sliceStart>8)await checkpoint();const node=nodes.get(id);if(!(activeId&&protectedNodes.has(activeId)&&node&&active?.contains(node)))node?.parentNode?.removeChild(node);nodes.delete(id);records.delete(id);dirty.delete(id);unindexAssets(id);mirrorRules.remove(id);}
     for(const record of upserts){
       if(performance.now()-sliceStart>8)await checkpoint();
       let node=nodes.get(record.id);let replaced:Node|undefined;
@@ -142,9 +150,21 @@ async function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
       const cached=appliedStyles.get(node),bodyScroll=record.id===root&&bodyScrollsWindow;
       const unchanged=cached&&cached.assetVersion===assetVersion&&cached.bodyScroll===bodyScroll&&sameStyle(cached.style,record.style);
       if(!unchanged){
-        const styles={...STYLE_DEFAULTS,...record.style};if(record.id===root&&bodyScrollsWindow){styles['overflow-x']='visible';styles['overflow-y']='visible';}
-        for(const key of Array.from(node.style))if(!(key in styles))node.style.removeProperty(key);
-        for(const [key,value]of Object.entries(styles)){if(!properties.has(key))continue;const safe=resolveValue(value);if(safe!==undefined){if(node.style.getPropertyValue(key)!==safe)node.style.setProperty(key,safe);}else node.style.removeProperty(key);}
+        const styles={...STYLE_DEFAULTS,...record.style};if(bodyScroll){styles['overflow-x']='visible';styles['overflow-y']='visible';}
+        const previous=cached?{...STYLE_DEFAULTS,...cached.style}:undefined;
+        if(previous&&cached?.bodyScroll){previous['overflow-x']='visible';previous['overflow-y']='visible';}
+        // Compare protocol values before touching CSSOM. A one-property change
+        // must not read/remove/rewrite every declaration on the element.
+        for(const key of previous?Object.keys(previous):Array.from(node.style))if(!(key in styles))node.style.removeProperty(key);
+        const gapChanged=previous?.gap!==styles.gap;
+        for(const [key,value]of Object.entries(styles)){
+          if(!properties.has(key))continue;
+          const resourceChanged=cached?.assetVersion!==assetVersion&&/asset:|url\s*\(|\\/i.test(value);
+          // Updating the gap shorthand resets both longhands, even if their
+          // protocol values are unchanged. Replay them after the shorthand.
+          if(previous&&previous[key]===value&&!resourceChanged&&!(gapChanged&&(key==='row-gap'||key==='column-gap')))continue;
+          const safe=resolveValue(value);if(safe!==undefined){if(node.style.getPropertyValue(key)!==safe)node.style.setProperty(key,safe);}else node.style.removeProperty(key);
+        }
         appliedStyles.set(node,{style:record.style,assetVersion,bodyScroll});
       }
       if(node instanceof HTMLImageElement){const id=record.assetUrl?.match(/^asset:([a-f0-9-]+)$/)?.[1];const url=id?assets.get(id):undefined;if(url&&node.src!==url)node.src=url;else if(!url)node.removeAttribute('src');}
@@ -167,13 +187,13 @@ async function applyRecords(upserts:MirrorNode[],remove:string[],root:string){
     for(const record of upserts){if(performance.now()-sliceStart>8)await checkpoint();const node=nodes.get(record.id);if(record.kind!=='element'||!node||protectedNodes.has(record.id))continue;const wanted=(record.children??[]).map(id=>nodes.get(id)).filter((n):n is Node=>!!n);for(let i=0;i<wanted.length;i++)if(node.childNodes[i]!==wanted[i])node.insertBefore(wanted[i],node.childNodes[i]??null);while(node.childNodes.length>wanted.length)node.removeChild(node.lastChild!);}
     const rootNode=nodes.get(root);if(rootNode&&mount.firstChild!==rootNode)mount.replaceChildren(rootNode);
     for(const record of upserts){if(performance.now()-sliceStart>8)await checkpoint();mirrorRules.sync(record,assetVersion);}
-    for(const [id,record]of records){if(!record.topLayer)continue;const node=nodes.get(id);if(!(node instanceof HTMLElement)||!node.isConnected)continue;
+    for(const [id,record]of records){if(performance.now()-sliceStart>8)await checkpoint();if(!record.topLayer)continue;const node=nodes.get(id);if(!(node instanceof HTMLElement)||!node.isConnected)continue;
       try{if(record.topLayer==='modal'&&node instanceof HTMLDialogElement&&!node.matches(':modal')){node.removeAttribute('open');node.showModal();}else if(record.topLayer==='popover'&&!node.matches(':popover-open'))node.showPopover();}catch{}
     }
     // A child patch can temporarily clamp an unchanged ancestor scroller.
     // Restore its authoritative offset even when the ancestor was not upserted.
     const updatedIds=new Set(upserts.map(record=>record.id));
-    for(const record of records.values()){if(!updatedIds.has(record.id)&&!record.scrollLeft&&!record.scrollTop)continue;const node=nodes.get(record.id);if(node instanceof HTMLElement&&!ownsScroll(record.id,record.scrollLeft??0,record.scrollTop??0)){
+    for(const record of records.values()){if(performance.now()-sliceStart>8)await checkpoint();if(!updatedIds.has(record.id)&&!record.scrollLeft&&!record.scrollTop)continue;const node=nodes.get(record.id);if(node instanceof HTMLElement&&!ownsScroll(record.id,record.scrollLeft??0,record.scrollTop??0)){
       const x=record.scrollLeft??node.scrollLeft,y=record.scrollTop??node.scrollTop;
       if(Math.abs(node.scrollTop-y)>1||Math.abs(node.scrollLeft-x)>1){expectedScrolls.set(record.id,{x,y,at:performance.now()});node.scrollTo(x,y);}
     }if(node instanceof HTMLSelectElement&&record.selectedIndex!==undefined&&!dirty.has(record.id))node.selectedIndex=record.selectedIndex;}
@@ -207,6 +227,7 @@ window.addEventListener('message',event=>{
     // stays ordered, so acknowledgements cannot overwrite newer local typing.
     if(message.type==='input-reset'){inputFlight=undefined;clearTimeout(inputTimer);inputTimer=undefined;pointerInput.reset();releaseKeys();pendingHover=undefined;clearTimeout(hoverTimer);return;}
     if(message.type==='ack'||message.type==='error'){
+      pointerInput.acknowledge(message.eventId,message.type==='error');
       if(inputFlight===message.eventId){inputFlight=undefined;if(pendingInput&&!composing&&!inputTimer)inputTimer=setTimeout(input,0);}
       if(message.type==='error')lastHover=undefined;
       if(hoverWaiting===message.eventId){hoverWaiting=0;clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}

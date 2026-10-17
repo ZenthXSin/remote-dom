@@ -13,6 +13,7 @@ export class PointerInput {
   private cancelled=new Set<number>();
   private fallbackClickUntil=0;
   private pending?:PointerEvent;
+  private moveFlight?:number;
   private moveTimer?:ReturnType<typeof setTimeout>;
   constructor(private emit:(event:Outgoing)=>number,private target:(target:EventTarget|null)=>Target|undefined,private before:()=>void,private zoom:()=>number){
     document.addEventListener('pointerdown',e=>this.down(e),true);
@@ -25,6 +26,12 @@ export class PointerInput {
     document.addEventListener('visibilitychange',()=>{if(document.hidden)this.cancel();});
   }
   get held(){return !!this.active;}
+  acknowledge(eventId:number,failed=false){
+    if(this.moveFlight!==eventId)return;
+    this.moveFlight=undefined;
+    if(failed){this.cancel();return;}
+    if(this.pending)this.flush();
+  }
   handlesClick(event:MouseEvent){
     const now=performance.now();for(const [id,until] of this.clicks)if(until<now)this.clicks.delete(id);
     if(event.detail<=0)return false;
@@ -56,23 +63,28 @@ export class PointerInput {
     const e=active.last,r=active.target.rect;
     this.emit({...this.data(e),key:'down',nodeId:active.target.nodeId,offsetX:(e.clientX-r.left)/r.width,offsetY:(e.clientY-r.top)/r.height,clickCount:active.count});
   }
-  private flush(){clearTimeout(this.moveTimer);this.moveTimer=undefined;const event=this.pending;this.pending=undefined;if(event&&this.active?.sent)this.emit({...this.data(event),key:'move'});}
+  private flush(force=false){
+    clearTimeout(this.moveTimer);this.moveTimer=undefined;
+    if(this.moveFlight!==undefined&&!force)return;
+    const event=this.pending;this.pending=undefined;
+    if(event&&this.active?.sent)this.moveFlight=this.emit({...this.data(event),key:'move'});
+  }
   private move(event:PointerEvent){
     const a=this.active;if(!a||event.pointerId!==a.id||!a.sent)return;a.last=event;
     if(a.type==='touch'&&!a.directTouch)return;
     if(!a.dragging&&Math.hypot(event.clientX-a.startX,event.clientY-a.startY)>=5){a.dragging=true;(event.target as Element)?.setPointerCapture?.(event.pointerId);}
     if(a.dragging)event.preventDefault();
-    // Bound traffic to one actual sampled position per frame. Flush the last
-    // sample before release; never generate/interpolate additional positions.
-    this.pending=event;if(!this.moveTimer)this.moveTimer=setTimeout(()=>this.flush(),16);
+    // Keep one unacknowledged move and the newest real sample. Slow links must
+    // not accumulate old coordinates ahead of release or the next click.
+    this.pending=event;if(!this.moveTimer&&this.moveFlight===undefined)this.moveTimer=setTimeout(()=>this.flush(),16);
   }
   private up(event:PointerEvent){
     const a=this.active;if(!a||event.pointerId!==a.id){if(this.cancelled.delete(event.pointerId)){this.fallbackClickUntil=performance.now()+1000;this.clicks.set(event.pointerId,this.fallbackClickUntil);}return;}
-    this.flush();if(a.sent){this.emit({...this.data(event),key:'up',clickCount:a.count});this.fallbackClickUntil=performance.now()+1000;this.clicks.set(a.id,this.fallbackClickUntil);}
-    this.active=undefined;
+    this.flush(true);if(a.sent){this.emit({...this.data(event),key:'up',clickCount:a.count});this.fallbackClickUntil=performance.now()+1000;this.clicks.set(a.id,this.fallbackClickUntil);}
+    this.active=undefined;this.moveFlight=undefined;
   }
   private cancel(){
-    const a=this.active;clearTimeout(this.moveTimer);this.moveTimer=undefined;this.pending=undefined;this.active=undefined;
+    const a=this.active;clearTimeout(this.moveTimer);this.moveTimer=undefined;this.pending=undefined;this.active=undefined;this.moveFlight=undefined;
     if(a?.sent){this.cancelled.add(a.id);while(this.cancelled.size>16)this.cancelled.delete(this.cancelled.values().next().value!);this.emit({...this.data(a.last),key:'cancel'});this.fallbackClickUntil=performance.now()+1000;this.clicks.set(a.id,this.fallbackClickUntil);}
   }
 }
