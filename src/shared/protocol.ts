@@ -1,6 +1,7 @@
 export const VERSION = 1;
 export const STYLE_PROPERTIES = [
   'display','position','top','right','bottom','left','z-index','box-sizing',
+  'float','clear','shape-outside','shape-margin','shape-image-threshold',
   'width','height','min-width','max-width','min-height','max-height',
   'margin-top','margin-right','margin-bottom','margin-left',
   'padding-top','padding-right','padding-bottom','padding-left',
@@ -19,7 +20,7 @@ export const STYLE_PROPERTIES = [
   'clip','clip-path','filter','backdrop-filter','isolation','text-overflow','aspect-ratio',
   'background-clip','background-origin','background-attachment','perspective','perspective-origin',
   'direction','writing-mode','unicode-bidi','hyphens','tab-size','overflow-clip-margin',
-  'overscroll-behavior-x','overscroll-behavior-y','touch-action','scrollbar-gutter','color-scheme',
+  'overscroll-behavior-x','overscroll-behavior-y','touch-action','scrollbar-gutter','scrollbar-width','scrollbar-color','color-scheme',
   'content','counter-reset','counter-increment',
   'fill','stroke','stroke-width','stroke-linecap','stroke-linejoin','fill-rule','clip-rule'
 ] as const;
@@ -27,6 +28,8 @@ export const STYLE_PROPERTIES = [
 // Keep inherited properties explicit, since flattened shadow trees change ancestry.
 export const STYLE_DEFAULTS:Record<string,string>={
   position:'static',top:'auto',right:'auto',bottom:'auto',left:'auto','z-index':'auto',
+  float:'none',clear:'none','shape-outside':'none','shape-margin':'0px','shape-image-threshold':'0',
+  'scrollbar-width':'auto','scrollbar-color':'auto',
   'max-width':'none','max-height':'none',
   'margin-top':'0px','margin-right':'0px','margin-bottom':'0px','margin-left':'0px',
   'padding-top':'0px','padding-right':'0px','padding-bottom':'0px','padding-left':'0px',
