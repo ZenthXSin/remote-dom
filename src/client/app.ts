@@ -4,6 +4,7 @@ import type {Snapshot,Patch,UserEvent} from '../shared/protocol.js';
 import {RenderQueue} from './render-queue.js';
 import {AssetLoader} from './assets.js';
 import {collectNodeAssets} from '../shared/assets.js';
+import {ViewportSync} from './viewport-sync.js';
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const stage=$('mirror-stage');
 const frame=$<HTMLIFrameElement>('mirror');const address=$<HTMLInputElement>('address');
@@ -19,7 +20,7 @@ $('retry-assets').addEventListener('click',()=>assetLoader.retry());
 let fixtureUrl='';let preferredUrl='';let heartbeat:ReturnType<typeof setInterval>|undefined;
 let transport='websocket';let httpFallback=false;let connected=false;let httpEpoch='';let httpSeq=-1;let socketTimeout:ReturnType<typeof setTimeout>|undefined;
 const httpClient=sessionStorage.getItem('rd_input_client')??crypto.randomUUID();sessionStorage.setItem('rd_input_client',httpClient);
-const pendingEvents:UserEvent[]=[];let writeBusy=false;let eventTimer:ReturnType<typeof setTimeout>|undefined;let progressTimer:ReturnType<typeof setTimeout>|undefined;let pollAbort:AbortController|undefined;let requestPoll:(()=>void)|undefined;let lastViewport='';
+const pendingEvents:UserEvent[]=[];let writeBusy=false;let eventTimer:ReturnType<typeof setTimeout>|undefined;let progressTimer:ReturnType<typeof setTimeout>|undefined;let pollAbort:AbortController|undefined;let requestPoll:(()=>void)|undefined;const viewportSync=new ViewportSync(()=>resize());
 let uncertainInput=false;
 function nextEventId(){const id=++eventCounter;sessionStorage.setItem('rd_event_counter',String(id));return id;}
 let zoom=1;
@@ -128,14 +129,14 @@ $('device-profile').addEventListener('click',()=>{
   $<HTMLDialogElement>('profile-dialog').showModal();
 });
 $('profile-close').addEventListener('click',()=>$<HTMLDialogElement>('profile-dialog').close());
-function viewportSize(){return {width:Math.max(160,Math.round(stage.clientWidth/zoom)),height:Math.max(160,Math.round(stage.clientHeight/zoom))};}
+function viewportSize(){return {width:Math.max(160,Math.min(3840,Math.round(stage.clientWidth/zoom))),height:Math.max(160,Math.min(2160,Math.round(stage.clientHeight/zoom)))};}
 function applyMirrorScale(){
  frame.style.width='100%';frame.style.height='100%';frame.style.transformOrigin='';frame.style.transform='';frame.style.left='';frame.style.top='';
 }
 function setZoom(scale:number){zoom=Math.max(.1,Math.min(4,scale));$('zoom-level').textContent=`${Math.round(zoom*100)}%`;applyMirrorScale();void ready.then(()=>port.postMessage({type:'zoom',scale:zoom}));resize();}
 $('fit-screen').addEventListener('click',()=>{
-  setZoom(1);lastViewport='';
-  requestAnimationFrame(()=>requestAnimationFrame(()=>{lastViewport='';resize();}));
+  setZoom(1);viewportSync.reset();
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{viewportSync.reset();resize();}));
 });
 $('zoom-out').addEventListener('click',()=>setZoom(zoom-.25));
 $('zoom-in').addEventListener('click',()=>setZoom(zoom+.25));
@@ -144,7 +145,7 @@ $('expand').addEventListener('click',()=>{
   const view=$('viewer');view.classList.toggle('is-expanded');document.body.classList.toggle('browser-expanded',view.classList.contains('is-expanded'));
   $('expand').textContent=view.classList.contains('is-expanded')?'↙':'⛶';
   $('expand').setAttribute('aria-label',view.classList.contains('is-expanded')?'恢复窗口':'放大窗口');
-  requestAnimationFrame(()=>requestAnimationFrame(()=>{lastViewport='';resize();}));
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{viewportSync.reset();resize();}));
 });
 document.addEventListener('keydown',event=>{if(event.key==='Escape'){$('viewer').classList.remove('is-expanded');document.body.classList.remove('browser-expanded');$('expand').textContent='⛶';$('expand').setAttribute('aria-label','放大窗口');resize();}});
 async function api(path:string,method='GET',data?:unknown){const response=await fetch(path,{method,headers:data?{'Content-Type':'application/json'}:undefined,body:data?JSON.stringify(data):undefined,cache:'no-store'});const result=await response.json();if(!response.ok)throw new Error(result.error??'请求失败');return result;}
@@ -174,6 +175,7 @@ function prepareAssets(message:Snapshot|Patch){
 function receive(message:any,id:string,localGeneration:number){
   if(localGeneration!==generation)return;
   if(message.type!=='snapshot'&&message.type!=='patch'){
+    if(message.type==='ack'||message.type==='error')viewportSync.acknowledge(message.eventId,message.type==='ack');
     void ready.then(()=>{if(localGeneration!==generation)return;
     if(message.type==='dialog'){
       if(browserDialogInfo?.id!==message.id){browserDialogInfo=message;$('browser-dialog-title').textContent=message.kind==='prompt'?'网页请求输入':message.kind==='beforeunload'?'确认离开网页':'网页提示';$('browser-dialog-origin').textContent=message.origin;$('browser-dialog-message').textContent=message.message;const value=$<HTMLInputElement>('browser-dialog-value');value.hidden=message.kind!=='prompt';value.value=message.defaultValue??'';$('browser-dialog-dismiss').hidden=message.kind==='alert';if(!browserDialog.open)browserDialog.showModal();if(!value.hidden)value.focus();}
@@ -198,12 +200,13 @@ function receive(message:any,id:string,localGeneration:number){
       epoch=message.epoch;const windows=message.windows??[];mainWindowId=windows[0]?.id??'';inChildWindow=windows.length>1&&!windows[0].active;viewBack.textContent=inChildWindow?'← 返回主窗口':'← 返回';viewBack.disabled=false;$('window-strip').hidden=windows.length<2;const select=$<HTMLSelectElement>('windows');if(JSON.stringify(windows)!==select.dataset.state){select.dataset.state=JSON.stringify(windows);select.replaceChildren();for(const window of windows){const option=document.createElement('option');option.value=window.id;option.textContent=window.title;option.selected=window.active;select.append(option);}}
       renders.push(message);persistenceNotice(message.persistenceError);if(document.activeElement!==address)address.value=message.url;$('page-title').textContent=message.title||'无标题';
       $('capabilities').textContent=message.unsupported?.length?`页面含暂不支持的能力：${message.unsupported.join('、')}`:message.truncated?'页面达到节点数量上限':'目标脚本在远端执行 · 本地不接收目标 Cookie';
-      if(message.type==='snapshot')resize();
+      if(message.viewport&&document.hasFocus()&&!document.hidden){viewportSync.observe(`${id}:${epoch}:${message.viewport.width}:${message.viewport.height}`);resize();}
+      else if(message.type==='snapshot')resize();
 
   }).catch(()=>{if(localGeneration===generation){resync();notice('同步暂不可用，请重新连接',true);}});
 }
 function online(){connected=true;frame.inert=false;notice(uncertainInput?'最近操作尚未确认，请核对页面状态':'已连接 · 页面由本地 DOM 渲染',uncertainInput);uncertainInput=false;$('connection').textContent='在线';$('connection').className='online';}
-function offline(){connected=false;port.postMessage({type:'input-reset'});frame.inert=true;$('connection').textContent='已断开';$('connection').className='';notice('连接中断，正在重新同步…');}
+function offline(){viewportSync.reset();connected=false;port.postMessage({type:'input-reset'});frame.inert=true;$('connection').textContent='已断开';$('connection').className='';notice('连接中断，正在重新同步…');}
 function resync(){httpEpoch='';httpSeq=-1;if(socket?.readyState===WebSocket.OPEN)socket.send(JSON.stringify({type:'resync'}));}
 function sendEvent(event:UserEvent){
   const last=pendingEvents.at(-1);
@@ -235,7 +238,7 @@ async function flushEvents(){
 function connect(id:string){
   clearTimeout(socketTimeout);renders.reset();
   for(const sent of sentAt.values())if(sent.frameId!==undefined){port.postMessage({type:'error',eventId:sent.frameId});uncertainInput=true;}sentAt.clear();operationFeedback();$('file-panel').hidden=true;
-  pollAbort?.abort();clearTimeout(eventTimer);clearTimeout(progressTimer);eventTimer=undefined;progressTimer=undefined;pendingEvents.length=0;writeBusy=false;requestPoll=undefined;lastViewport='';
+  pollAbort?.abort();clearTimeout(eventTimer);clearTimeout(progressTimer);eventTimer=undefined;progressTimer=undefined;pendingEvents.length=0;writeBusy=false;requestPoll=undefined;viewportSync.reset();
   clearTimeout(reconnectTimer);clearInterval(heartbeat);generation++;socket?.close();socket=undefined;activeId=id;closing=false;connected=false;frame.inert=true;
   const localGeneration=generation;
   $('connection').dataset.transport=transport;
@@ -299,9 +302,10 @@ $('resync').addEventListener('click',resync);
 $('windows').addEventListener('change',()=>{if(activeId)void api(`/api/sessions/${activeId}/windows`,'POST',{id:$<HTMLSelectElement>('windows').value}).catch(error=>notice(error.message,true));});
 $('close-window').addEventListener('click',()=>{if(activeId)void api(`/api/sessions/${activeId}/windows`,'POST',{action:'close'}).catch(error=>notice(error.message,true));});
 $<HTMLSelectElement>('sessions').addEventListener('change',event=>{const id=(event.target as HTMLSelectElement).value;if(id){port.postMessage({type:'reset'});assetLoader.reset();connect(id);}});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&connected)requestPoll?.();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)viewportSync.reset();else if(connected){viewportSync.reset();resize();requestPoll?.();}});
+window.addEventListener('focus',()=>{if(connected){viewportSync.reset();resize();}});
 let resizeTimer:ReturnType<typeof setTimeout>|undefined;
-function resize(){clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(!epoch||!connected)return;const size=viewportSize(),key=`${activeId}:${epoch}:${size.width}:${size.height}`;if(key===lastViewport)return;lastViewport=key;sendEvent({type:'event',action:'viewport',epoch,eventId:nextEventId(),...size});},35);}
+function resize(){clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(!activeId||closing||!epoch||!connected||document.hidden)return;const size=viewportSize(),key=`${activeId}:${epoch}:${size.width}:${size.height}`;viewportSync.update(key,()=>{const eventId=nextEventId();sendEvent({type:'event',action:'viewport',epoch,eventId,...size});return eventId;});},35);}
 new ResizeObserver(()=>{applyMirrorScale();resize();}).observe(stage);
 void refresh().then(state=>{if(state.sessions.length){activeId=state.sessions[0].id;void ready.then(()=>{connect(activeId);$('empty').hidden=true;frame.hidden=false;});}}).catch(error=>notice(error.message,true));
 

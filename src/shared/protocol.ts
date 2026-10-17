@@ -74,6 +74,7 @@ export interface MirrorNode {
   media?:{paused:boolean;currentTime:number;volume:number;muted:boolean;loop:boolean;playbackRate:number};
 }
 export interface DocumentState {
+  viewport?:{width:number;height:number};
   persistenceError?:string;
   inputRevision?:number;
   viewportStyle?:Record<string,string>;

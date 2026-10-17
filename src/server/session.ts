@@ -159,8 +159,8 @@ export class RemoteSession {
     const info:BrowserDialogMessage={type:'dialog',epoch:this.epoch,id:randomUUID(),kind:dialog.type() as BrowserDialogMessage['kind'],message:dialog.message().slice(0,10000),defaultValue:dialog.defaultValue().slice(0,10000),origin};
     this.pendingDialog={dialog,info};this.broadcast(info);
   });}
-  private async metrics(){await this.cdp.send('Emulation.setDeviceMetricsOverride',{
-    ...this.viewport,screenWidth:this.deviceProfile.screen.width,screenHeight:this.deviceProfile.screen.height,
+  private async metrics(viewport=this.viewport){await this.cdp.send('Emulation.setDeviceMetricsOverride',{
+    ...viewport,screenWidth:this.deviceProfile.screen.width,screenHeight:this.deviceProfile.screen.height,
     deviceScaleFactor:this.deviceProfile.deviceScaleFactor,mobile:this.deviceProfile.isMobile,screenOrientation:{angle:0,type:this.deviceProfile.isMobile?'portraitPrimary':'landscapePrimary'}});}
   view(){const wasIdle=Date.now()-this.lastViewActivity>=2000;this.lastViewActivity=Date.now();if(wasIdle&&this.timer){clearTimeout(this.timer);this.schedule();}}
   private schedule(){if(!this.closed)this.timer=setTimeout(()=>{this.timer=undefined;void this.poll().finally(()=>this.schedule());},this.sockets.size||Date.now()-this.lastViewActivity<2000?60:1500);}
@@ -181,12 +181,12 @@ export class RemoteSession {
     try {
       const assetState=`${this.assetRevision}:${this.fontRules.size}:${this.svgSources.size}:${this.persistenceError}`;
       if(!force&&this.current&&assetState===this.capturedAssetState&&!await this.capture.needsCapture())return;
-      const epoch=this.epoch,revision=this.inputRevision;
+      const epoch=this.epoch,revision=this.inputRevision,viewport={...this.viewport};
       const captureStart=performance.now();const raw=await this.capture.capture();this.diagnostics.add('capture',{ms:Math.round(performance.now()-captureStart)});if(epoch!==this.epoch)return;
       if(Buffer.byteLength(JSON.stringify(raw))>4*1024*1024)throw new Error('页面超过当前快照大小限制');
       const document=sanitizeDocument(raw,url=>this.resource(url));
       this.capturedAssetState=assetState;
-      document.inputRevision=revision;
+      document.inputRevision=revision;document.viewport=viewport;
       document.persistenceError=this.persistenceError||undefined;
       const active=this.windows.get(this.activeWindow);if(active)active.title=document.title;
       document.windows=[...this.windows].map(([id,w])=>({id,title:w.title||'新窗口',active:id===this.activeWindow}));
@@ -279,8 +279,8 @@ export class RemoteSession {
       if(!Number.isFinite(event.width)||!Number.isFinite(event.height))throw new Error('Invalid viewport');
       // Playwright setViewportSize also replaces screen dimensions. Override only
       // the viewport through CDP so a window resize never changes device identity.
-      this.viewport={width:Math.max(160,Math.min(3840,Math.round(event.width!))),height:Math.max(160,Math.min(2160,Math.round(event.height!)))};
-      await this.metrics();return;
+      const viewport={width:Math.max(160,Math.min(3840,Math.round(event.width!))),height:Math.max(160,Math.min(2160,Math.round(event.height!)))};
+      await this.metrics(viewport);this.viewport=viewport;return;
     }
     if(event.action==='pointer'&&event.nativePointer){
       if(!['down','move','up','cancel'].includes(event.key??'')||!Number.isFinite(event.x)||!Number.isFinite(event.y))throw new Error('Invalid pointer');
