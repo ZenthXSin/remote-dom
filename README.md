@@ -12,7 +12,7 @@
 - 页面导航、输入、上传下载、多窗口、查找和会话恢复。
 - [使用自己的 sessionKey 登录 Claude](docs/claude-session-login.zh-CN.md)，支持全屏悬浮球入口。
 - 图片、字体和媒体在用户浏览器中持久缓存，服务端按需转发。
-- 移动设备参数模拟、修改远端视口尺寸以适配屏幕、沉浸式全屏和悬浮工具球。
+- [切换 Windows、Android、macOS、iPad、iPhone 和 Linux 设备模拟](docs/device-switch.zh-CN.md)、修改远端视口尺寸以适配屏幕、沉浸式全屏和悬浮工具球。
 
 ## 本地演示
 

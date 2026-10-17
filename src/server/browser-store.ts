@@ -1,9 +1,10 @@
 import {randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
 import {mkdir,readFile,writeFile,rename,stat,open,unlink} from 'node:fs/promises';
 import {join} from 'node:path';
+import type {DevicePreset} from '../shared/device-presets.js';
 import type {BrowserContext} from 'playwright-core';
 export type LoginState=Awaited<ReturnType<BrowserContext['storageState']>>;
-interface SavedBrowser {id:string;owner:string;url:string;title:string;savedAt:string;state:LoginState}
+interface SavedBrowser {id:string;owner:string;url:string;title:string;savedAt:string;state:LoginState;devicePreset?:DevicePreset}
 interface Registry {owners:Record<string,{expires:number;recovery:string}>;browsers:Record<string,SavedBrowser>}
 export class BrowserStore {
   private key!:Buffer;private registry:Registry={owners:{},browsers:{}};private writes=Promise.resolve();

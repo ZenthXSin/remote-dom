@@ -22,6 +22,8 @@ import {createBrowserProxy} from './browser-proxy.js';
 import {monitorSocket} from './socket-health.js';
 import {AssetTransit} from './asset-transit.js';
 import {ClaudeLoginError,importClaudeSession} from './claude-login.js';
+import {deviceEmulation} from './device-emulation.js';
+import {isDevicePreset,type DevicePreset} from '../shared/device-presets.js';
 import {ASSET_MIMES,MAX_ASSET_BYTES,fetchAsset,type AssetBody,type AssetSource} from './asset-source.js';
 
 export class RemoteSession {
@@ -51,10 +53,11 @@ export class RemoteSession {
   private saveTimer?:NodeJS.Timeout;
   private saveTask?:Promise<void>;
   private claudeLoginBusy=false;
+  private deviceSwitchBusy=false;
   private persistenceError='';
   private pollTask?:Promise<void>;
   private lastViewActivity=0;private capturedAssetState='';
-  constructor(readonly owner:string,readonly config:Config,readonly policy:TargetPolicy,readonly deviceProfile:DeviceProfile,private store?:BrowserStore,private restoredState?:LoginState,restoredId?:string){if(restoredId)(this as {id:string}).id=restoredId;}
+  constructor(readonly owner:string,readonly config:Config,readonly policy:TargetPolicy,readonly deviceProfile:DeviceProfile,private store?:BrowserStore,private restoredState?:LoginState,restoredId?:string,private devicePreset:DevicePreset='default'){if(restoredId)(this as {id:string}).id=restoredId;if(!isDevicePreset(devicePreset))throw new Error('无效设备类型');}
   async start(url:string,viewport={width:1100,height:760}) {
     this.requestedUrl=url;
     viewport=this.deviceProfile.platform==='Android'?{...devices['Pixel 7'].viewport}:viewport;
@@ -112,6 +115,7 @@ export class RemoteSession {
     if(this.closed||this.windows.size>=3){await page.close();return;}
     const id=randomUUID();const cdp=await this.context.newCDPSession(page);
     await cdp.send('Page.enable');await cdp.send('Runtime.enable');
+    if(this.devicePreset!=='default')await this.emulateDevice(cdp,this.devicePreset);
     const capture=new FrameCapture(page,cdp,this.captureSource,this.svgSources);
     this.windows.set(id,{page,cdp,capture,title:''});
     this.watchDialogs(page);
@@ -159,9 +163,35 @@ export class RemoteSession {
     const info:BrowserDialogMessage={type:'dialog',epoch:this.epoch,id:randomUUID(),kind:dialog.type() as BrowserDialogMessage['kind'],message:dialog.message().slice(0,10000),defaultValue:dialog.defaultValue().slice(0,10000),origin};
     this.pendingDialog={dialog,info};this.broadcast(info);
   });}
-  private async metrics(viewport=this.viewport){await this.cdp.send('Emulation.setDeviceMetricsOverride',{
-    ...viewport,screenWidth:this.deviceProfile.screen.width,screenHeight:this.deviceProfile.screen.height,
-    deviceScaleFactor:this.deviceProfile.deviceScaleFactor,mobile:this.deviceProfile.isMobile,screenOrientation:{angle:0,type:this.deviceProfile.isMobile?'portraitPrimary':'landscapePrimary'}});}
+  private get emulatedDevice(){return deviceEmulation(this.devicePreset??'default',this.deviceProfile,this.browser.version());}
+  private async metrics(viewport=this.viewport,cdp=this.cdp,preset=this.devicePreset){
+    const device=deviceEmulation(preset??'default',this.deviceProfile,this.browser.version());
+    await cdp.send('Emulation.setDeviceMetricsOverride',{...viewport,screenWidth:device.screen.width,screenHeight:device.screen.height,
+      deviceScaleFactor:device.deviceScaleFactor,mobile:device.isMobile,screenOrientation:{angle:0,type:device.isMobile?'portraitPrimary':'landscapePrimary'}});
+  }
+  private async emulateDevice(cdp:CDPSession,preset:DevicePreset){
+    const device=deviceEmulation(preset,this.deviceProfile,this.browser.version());
+    await cdp.send('Emulation.setUserAgentOverride',{userAgent:device.userAgent,platform:device.platform});
+    await cdp.send('Emulation.setTouchEmulationEnabled',{enabled:device.hasTouch,maxTouchPoints:device.hasTouch?5:1});
+    await this.metrics(this.viewport,cdp,preset);
+  }
+  async switchDevice(preset:unknown){
+    if(!isDevicePreset(preset))throw new Error('无效设备类型');
+    if(this.closed||!this.page||this.page.isClosed())throw new Error('请先打开或恢复浏览器');
+    if(this.deviceSwitchBusy||this.claudeLoginBusy)throw new Error('浏览器正在处理切换，请稍候');
+    if(this.pendingDialog)throw new Error('请先处理网页提示框');
+    const previous=this.devicePreset??'default';if(previous===preset)return {preset,reloaded:true,persistence:!!this.store};
+    this.deviceSwitchBusy=true;
+    try{
+      await this.pointer.cancel();await this.keyboard.cancel();
+      try{for(const window of this.windows.values())await this.emulateDevice(window.cdp,preset);}
+      catch{for(const window of this.windows.values())await this.emulateDevice(window.cdp,previous).catch(()=>{});throw new Error('设备切换失败，请重试');}
+      this.devicePreset=preset;
+      let reloaded=true;try{await this.page.reload({waitUntil:'domcontentloaded',timeout:20000});}catch{reloaded=false;}
+      await this.poll(true);await this.saveTask?.catch(()=>{});await this.saveState();
+      return {preset,reloaded,persistence:!!this.store};
+    }finally{this.deviceSwitchBusy=false;}
+  }
   view(){const wasIdle=Date.now()-this.lastViewActivity>=2000;this.lastViewActivity=Date.now();if(wasIdle&&this.timer){clearTimeout(this.timer);this.schedule();}}
   private schedule(){if(!this.closed)this.timer=setTimeout(()=>{this.timer=undefined;void this.poll().finally(()=>this.schedule());},this.sockets.size||Date.now()-this.lastViewActivity<2000?60:1500);}
   poll(force=false):Promise<void> {
@@ -186,7 +216,7 @@ export class RemoteSession {
       if(Buffer.byteLength(JSON.stringify(raw))>4*1024*1024)throw new Error('页面超过当前快照大小限制');
       const document=sanitizeDocument(raw,url=>this.resource(url));
       this.capturedAssetState=assetState;
-      document.inputRevision=revision;document.viewport=viewport;
+      document.inputRevision=revision;document.viewport=viewport;document.devicePreset=this.devicePreset??'default';
       document.persistenceError=this.persistenceError||undefined;
       const active=this.windows.get(this.activeWindow);if(active)active.title=document.title;
       document.windows=[...this.windows].map(([id,w])=>({id,title:w.title||'新窗口',active:id===this.activeWindow}));
@@ -280,6 +310,7 @@ export class RemoteSession {
       // Playwright setViewportSize also replaces screen dimensions. Override only
       // the viewport through CDP so a window resize never changes device identity.
       const viewport={width:Math.max(160,Math.min(3840,Math.round(event.width!))),height:Math.max(160,Math.min(2160,Math.round(event.height!)))};
+      if(this.deviceSwitchBusy)throw new Error('设备切换中，请稍候');
       await this.metrics(viewport);this.viewport=viewport;return;
     }
     if(event.action==='pointer'&&event.nativePointer){
@@ -290,7 +321,7 @@ export class RemoteSession {
         const route=this.capture.route(event.nodeId);if(!route)throw new Error('Pointer frame unavailable');
         position=await this.capture.position(route,event.offsetX,event.offsetY);
       }
-      await this.pointer.dispatch(event,peer,this.cdp,this.deviceProfile.hasTouch,position);return;
+      await this.pointer.dispatch(event,peer,this.cdp,this.emulatedDevice.hasTouch,position);return;
     }
     if(event.action==='pointer'){
       if(!['down','move','up'].includes(event.key??'')||!Number.isFinite(event.x)||!Number.isFinite(event.y))throw new Error('Invalid pointer');
@@ -314,7 +345,7 @@ export class RemoteSession {
       if(windowFrame)await this.evaluate(`window.scrollTo(${x},${y})`,windowFrame);else await evaluate(`${node}?.scrollTo(${x},${y})`);return;
     }
     if(event.action==='click'||event.action==='hover'){
-      const pointer={...event,pointerType:this.deviceProfile.hasTouch?event.pointerType:undefined};
+      const pointer={...event,pointerType:this.emulatedDevice.hasTouch?event.pointerType:undefined};
       if(event.clipboard&&event.action==='click'){
         const origin=new URL(this.page.url()).origin,marker=randomUUID();let ready=false;
         try{await this.context.grantPermissions(['clipboard-read','clipboard-write'],{origin});await this.evaluate(`navigator.clipboard.writeText(${JSON.stringify(marker)})`);ready=true;}catch{}
@@ -389,7 +420,7 @@ export class RemoteSession {
     const task=(async()=>{
       try{
         const state=await this.context.storageState({indexedDB:true});if(this.store!==store)return;
-        await store.save({id:this.id,owner:this.owner,url:this.current?.url??this.requestedUrl,title:this.current?.title??'已保存的浏览器',savedAt:new Date().toISOString(),state});
+        await store.save({id:this.id,owner:this.owner,url:this.current?.url??this.requestedUrl,title:this.current?.title??'已保存的浏览器',savedAt:new Date().toISOString(),state,devicePreset:this.devicePreset??'default'});
         this.persistenceError='';
       }catch(error){
         const message='浏览器环境未能保存，当前登录状态可能在关闭后丢失。请保持页面打开并联系管理员。';
@@ -401,7 +432,7 @@ export class RemoteSession {
   }
   disablePersistence(){clearInterval(this.saveTimer);this.store=undefined;}
   async loginClaude(value:unknown){
-    if(this.claudeLoginBusy)throw new ClaudeLoginError('正在应用 Claude 登录凭据，请稍候',409);
+    if(this.claudeLoginBusy||this.deviceSwitchBusy)throw new ClaudeLoginError('浏览器正在处理登录或设备切换，请稍候',409);
     if(this.closed||!this.context||!this.page||this.page.isClosed())throw new ClaudeLoginError('请先打开或恢复浏览器',409);
     if(this.pendingDialog)throw new ClaudeLoginError('请先处理远端网页的提示框',409);
     this.claudeLoginBusy=true;
@@ -420,6 +451,6 @@ export class RemoteSession {
     const flow=this.renderFlow.get(socket);if(flow&&(message.type==='snapshot'||message.type==='patch')){if(flow.enabled&&flow.waiting)return;flow.waiting={epoch:message.epoch,seq:message.seq};}
     if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
-  summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,persistenceError:this.persistenceError||undefined};}
+  summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,devicePreset:this.devicePreset??'default',persistenceError:this.persistenceError||undefined};}
   async close(force=false){if(this.closed)return;try{await this.saveState();}catch(error){if(!force)throw error;}this.closed=true;await this.pointer.cancel();await this.keyboard.cancel();this.diagnostics.clear();clearInterval(this.saveTimer);this.uploads.clear();this.picker=undefined;this.downloads.clear();clearTimeout(this.timer);this.broadcast({type:'closed'});for(const socket of this.sockets)socket.close(1000,'Session closed');this.sockets.clear();await this.browser?.close().catch(()=>{});await this.networkGuard?.close();this.networkGuard=undefined;this.assets.clear();this.inlineTransit.clear();this.inlineIds=[];this.assetByUrl.clear();this.fontRules.clear();this.svgSources.clear();this.svgBytes=0;this.windows.clear();this.history.clear();this.current=undefined;}
 }

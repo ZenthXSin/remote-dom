@@ -4,6 +4,7 @@ import type {Snapshot,Patch,UserEvent} from '../shared/protocol.js';
 import {RenderQueue} from './render-queue.js';
 import {AssetLoader} from './assets.js';
 import {collectNodeAssets} from '../shared/assets.js';
+import {DEVICE_PRESETS,type DevicePreset} from '../shared/device-presets.js';
 import {ViewportSync} from './viewport-sync.js';
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const stage=$('mirror-stage');
@@ -58,6 +59,30 @@ async function loginClaude(){
     claudeDialog.close();
   }catch(error){$('claude-login-status').textContent=error instanceof Error?error.message:'Claude 登录请求未完成，请重试';}
   finally{payload.sessionKey='';claudeKey.value='';claudeBusy=false;setBrowserBusy(false);$<HTMLButtonElement>('claude-login-submit').disabled=false;$<HTMLButtonElement>('claude-login-close').disabled=false;}
+}
+let activeDevice:DevicePreset='default',deviceTarget='',deviceBusy=false;
+const deviceDialog=$<HTMLDialogElement>('device-switch-dialog'),deviceSelect=$<HTMLSelectElement>('device-switch-preset');
+for(const preset of DEVICE_PRESETS){const option=document.createElement('option');option.value=preset.id;option.textContent=preset.label;deviceSelect.append(option);}
+$('device-switch-open').addEventListener('click',()=>{
+  if(browserBusy||deviceBusy)return;
+  if(!activeId){notice('请先打开或恢复浏览器',true);return;}
+  deviceTarget=activeId;deviceSelect.value=activeDevice;$('device-switch-status').textContent='';deviceDialog.showModal();
+});
+function closeDeviceSwitch(){if(!deviceBusy){deviceTarget='';deviceDialog.close();}}
+$('device-switch-close').addEventListener('click',closeDeviceSwitch);
+deviceDialog.addEventListener('cancel',event=>{event.preventDefault();closeDeviceSwitch();});
+$('device-switch-form').addEventListener('submit',event=>{event.preventDefault();void switchDevice();});
+async function switchDevice(){
+  if(deviceBusy)return;
+  if(!deviceTarget||deviceTarget!==activeId){$('device-switch-status').textContent='当前浏览器已改变，请关闭后重新打开工具';return;}
+  deviceBusy=true;setBrowserBusy(true);deviceSelect.disabled=true;$<HTMLButtonElement>('device-switch-submit').disabled=true;$<HTMLButtonElement>('device-switch-close').disabled=true;
+  $('device-switch-status').textContent='正在切换设备并刷新网页…';
+  try{
+    const result=await api(`/api/sessions/${deviceTarget}/device`,'POST',{preset:deviceSelect.value});activeDevice=result.preset;
+    viewportSync.reset();resize();deviceDialog.close();
+    notice(result.reloaded?'已切换为 '+(DEVICE_PRESETS.find(p=>p.id===activeDevice)?.label??activeDevice)+'，网页已刷新':'设备已切换，网页尚未加载完成，请稍后刷新远端网页');
+  }catch(error){$('device-switch-status').textContent=(error as Error).message;}
+  finally{deviceBusy=false;setBrowserBusy(false);deviceSelect.disabled=false;$<HTMLButtonElement>('device-switch-submit').disabled=false;$<HTMLButtonElement>('device-switch-close').disabled=false;}
 }
 const recoveryDialog=$<HTMLDialogElement>('recovery-dialog');
 $('recovery-close').addEventListener('click',()=>recoveryDialog.close());
@@ -124,7 +149,7 @@ let containerProfile:Record<string,any>|undefined;let containerEnvironment:Recor
 $('device-profile').addEventListener('click',()=>{
   if(!containerProfile)return;
   const p=containerProfile;
-  $('profile-details').textContent=`档案编号：${p.id}\n创建时间：${p.createdAt}\n设备：${p.device}\n屏幕：${p.screen.width} × ${p.screen.height}\n像素比例：${p.deviceScaleFactor}\n语言：${p.locale}\n时区：${p.timezoneId}\n主题：${p.colorScheme}\n系统：${p.platform}\n浏览器：使用实际 Chromium 版本\n设备类型：${p.isMobile?'手机，支持触控':'桌面，无触摸设备'}`;
+  $('profile-details').textContent=`当前浏览器模拟：${DEVICE_PRESETS.find(p=>p.id===activeDevice)?.label??activeDevice}\n基础档案编号：${p.id}\n创建时间：${p.createdAt}\n设备：${p.device}\n屏幕：${p.screen.width} × ${p.screen.height}\n像素比例：${p.deviceScaleFactor}\n语言：${p.locale}\n时区：${p.timezoneId}\n主题：${p.colorScheme}\n系统：${p.platform}\n浏览器：使用实际 Chromium 版本\n设备类型：${p.isMobile?'手机，支持触控':'桌面，无触摸设备'}`;
   if(containerEnvironment){const e=containerEnvironment;$('profile-details').textContent+=`\n\n系统环境：${e.os.id} ${e.os.version}\n系统主机名：${e.hostname}\n系统 machine-id：${e.machineId}\n原生可用 CPU：${e.cpuIds.length}\n容器内存上限：${e.memoryLimitBytes/1024**3} GiB\n系统语言：${e.locale}\n系统时区：${e.timezoneId}`;}
   $<HTMLDialogElement>('profile-dialog').showModal();
 });
@@ -197,7 +222,7 @@ function receive(message:any,id:string,localGeneration:number){
       pendingFilePicker=message.filePicker;pickerSession=id;pickerEpoch=message.epoch;$('file-panel').hidden=!pendingFilePicker;
       const files=message.downloads??[];const downloads=$('downloads');
       if(downloads.dataset.state!==JSON.stringify(files)){downloads.dataset.state=JSON.stringify(files);downloads.replaceChildren();for(const file of files){const link=document.createElement('a');link.href=`/api/sessions/${id}/downloads/${file.id}`;link.textContent=`下载 ${file.name}`;link.className='secondary';link.setAttribute('download',file.name);downloads.append(link);}}
-      epoch=message.epoch;const windows=message.windows??[];mainWindowId=windows[0]?.id??'';inChildWindow=windows.length>1&&!windows[0].active;viewBack.textContent=inChildWindow?'← 返回主窗口':'← 返回';viewBack.disabled=false;$('window-strip').hidden=windows.length<2;const select=$<HTMLSelectElement>('windows');if(JSON.stringify(windows)!==select.dataset.state){select.dataset.state=JSON.stringify(windows);select.replaceChildren();for(const window of windows){const option=document.createElement('option');option.value=window.id;option.textContent=window.title;option.selected=window.active;select.append(option);}}
+      epoch=message.epoch;activeDevice=message.devicePreset??'default';const windows=message.windows??[];mainWindowId=windows[0]?.id??'';inChildWindow=windows.length>1&&!windows[0].active;viewBack.textContent=inChildWindow?'← 返回主窗口':'← 返回';viewBack.disabled=false;$('window-strip').hidden=windows.length<2;const select=$<HTMLSelectElement>('windows');if(JSON.stringify(windows)!==select.dataset.state){select.dataset.state=JSON.stringify(windows);select.replaceChildren();for(const window of windows){const option=document.createElement('option');option.value=window.id;option.textContent=window.title;option.selected=window.active;select.append(option);}}
       renders.push(message);persistenceNotice(message.persistenceError);if(document.activeElement!==address)address.value=message.url;$('page-title').textContent=message.title||'无标题';
       $('capabilities').textContent=message.unsupported?.length?`页面含暂不支持的能力：${message.unsupported.join('、')}`:message.truncated?'页面达到节点数量上限':'目标脚本在远端执行 · 本地不接收目标 Cookie';
       if(message.viewport&&document.hasFocus()&&!document.hidden){viewportSync.observe(`${id}:${epoch}:${message.viewport.width}:${message.viewport.height}`);resize();}

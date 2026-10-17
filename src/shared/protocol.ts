@@ -74,6 +74,7 @@ export interface MirrorNode {
   media?:{paused:boolean;currentTime:number;volume:number;muted:boolean;loop:boolean;playbackRate:number};
 }
 export interface DocumentState {
+  devicePreset?:import('./device-presets.js').DevicePreset;
   viewport?:{width:number;height:number};
   persistenceError?:string;
   inputRevision?:number;

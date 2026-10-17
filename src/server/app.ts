@@ -72,7 +72,7 @@ export async function createApp(config:Config,running?:RunningAppState) {
       if(!store!.read(owner,saved.id)){reply(res,404,{error:'保存的环境已清除'});return;}
       if(sessions.has(saved.id)){reply(res,200,sessions.get(saved.id)!.summary());return;}
       if(sessions.size>=config.maxSessions||[...sessions.values()].filter(s=>s.owner===owner).length>=2){reply(res,429,{error:'请先结束现有会话'});return;}
-      const session=new RemoteSession(owner,config,policy,deviceProfile,store,saved.state,saved.id);sessions.set(session.id,session);
+      const session=new RemoteSession(owner,config,policy,deviceProfile,store,saved.state,saved.id,saved.devicePreset??'default');sessions.set(session.id,session);
       try{await session.start(saved.url);reply(res,201,session.summary());}catch{sessions.delete(session.id);await session.close(true);reply(res,503,{error:'保存的环境暂时无法启动'});}return;
     }
     if(path==='/api/sessions'&&req.method==='POST'){
@@ -89,7 +89,7 @@ export async function createApp(config:Config,running?:RunningAppState) {
       finally{pending--;pendingOwners.set(owner,(pendingOwners.get(owner)??1)-1);}
       return;
     }
-    const match=path.match(/^\/api\/sessions\/([a-f0-9-]+)(?:\/(claude-login|diagnostics|navigate|navigation|assets|updates|events|windows|uploads|downloads)(?:\/([a-f0-9-]+))?)?$/);
+    const match=path.match(/^\/api\/sessions\/([a-f0-9-]+)(?:\/(device|claude-login|diagnostics|navigate|navigation|assets|updates|events|windows|uploads|downloads)(?:\/([a-f0-9-]+))?)?$/);
     if(match){
       const session=sessions.get(match[1]);if(!session||session.owner!==owner){reply(res,404,{error:'会话不存在'});return;}
       session.lastActivity=Date.now();
@@ -101,6 +101,7 @@ export async function createApp(config:Config,running?:RunningAppState) {
         try{const request=await body(req,5000);reply(res,200,await session.loginClaude(request.sessionKey));}
         catch(error){reply(res,error instanceof ClaudeLoginError?error.status:400,{error:error instanceof ClaudeLoginError?error.message:'Claude 登录请求未完成，请检查输入后重试'});}return;
       }
+      if(match[2]==='device'&&!match[3]&&req.method==='POST'){const request=await body(req);reply(res,200,await session.switchDevice(request.preset));return;}
       if(match[2]==='diagnostics'){
         if(req.method==='GET'){reply(res,200,session.diagnostics.report());return;}
         if(req.method==='POST'){const request=await body(req);if(request.action==='start'){reply(res,200,await session.startDiagnostics());return;}if(request.action==='stop'){reply(res,200,await session.stopDiagnostics());return;}throw new Error('无效记录操作');}
