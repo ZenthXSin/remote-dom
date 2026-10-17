@@ -60,7 +60,7 @@ function pointerNode(target:EventTarget|null){let node=target instanceof Node?ta
 function editableTarget(target:EventTarget|null){return target instanceof HTMLElement?target.closest<HTMLElement>('[contenteditable="plaintext-only"]')??undefined:undefined;}
 function input(){
   flushScroll();
-  clearTimeout(inputTimer);const target=pendingInput;pendingInput=undefined;if(!target)return;
+  clearTimeout(inputTimer);inputTimer=undefined;const target=pendingInput;pendingInput=undefined;if(!target)return;
   const id=reverse.get(target);if(!id)return;
   let value:string,start:number|undefined,end:number|undefined;
   if(target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement){value=target.value;start=target.selectionStart??undefined;end=target.selectionEnd??undefined;}
@@ -190,7 +190,16 @@ async function update(message:(Snapshot|Patch)&{renderToken?:number}){
 }
 window.addEventListener('message',event=>{
   if(event.source!==parent||event.data?.type!=='initialize'||!event.ports[0]||port)return;
-  port=event.ports[0];port.onmessage=event=>{const message=event.data;scheduleWork(async()=>{
+  port=event.ports[0];port.onmessage=event=>{const message=event.data;
+    // Accept control metadata between render slices. DOM reconciliation still
+    // stays ordered, so acknowledgements cannot overwrite newer local typing.
+    if(message.type==='input-reset'){pointerInput.reset();releaseKeys();pendingHover=undefined;clearTimeout(hoverTimer);return;}
+    if(message.type==='ack'||message.type==='error'){
+      if(message.type==='error')lastHover=undefined;
+      if(hoverWaiting===message.eventId){hoverWaiting=0;clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}
+      if(message.type==='ack'&&message.inputRevision!==undefined&&[...dirty.values()].includes(message.eventId))inputAcks.set(message.eventId,message.inputRevision);
+    }
+    scheduleWork(async()=>{
     if(message.type==='find'){findText(String(message.query??''),Number(message.direction)||0);return;}
     if(message.type==='zoom'){
       const next=Math.max(.1,Math.min(4,Number(message.scale)||1));
@@ -200,11 +209,8 @@ window.addEventListener('message',event=>{
     if(message.type==='asset'){if(assets.has(message.id))return;assets.set(message.id,URL.createObjectURL(new Blob([message.bytes],{type:message.mime})));assetVersion++;pendingAssets.add(message.id);if(assetPaint===undefined)assetPaint=requestAnimationFrame(()=>scheduleWork(paintAssets));return;}
     if(message.type==='snapshot'||message.type==='patch')await update(message);
     if(message.type==='reset')reset(true);
-    if(message.type==='input-reset'){pointerInput.reset();releaseKeys();pendingHover=undefined;clearTimeout(hoverTimer);}
     if(message.type==='ack'||message.type==='error'){
-      if(message.type==='error')lastHover=undefined;
-      if(hoverWaiting===message.eventId){hoverWaiting=0;clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}
-      if(message.type==='ack'&&message.inputRevision!==undefined){if([...dirty.values()].includes(message.eventId))inputAcks.set(message.eventId,message.inputRevision);const released=retireInputs();const changed=new Map<string,MirrorNode>();const add=(id:string)=>{const record=records.get(id);if(record&&!changed.has(id)){changed.set(id,record);for(const child of record.children??[])add(child);}};for(const id of released)add(id);if(changed.size)await applyRecords([...changed.values()],[],currentRoot);}
+      if(message.type==='ack'&&message.inputRevision!==undefined){const released=retireInputs();const changed=new Map<string,MirrorNode>();const add=(id:string)=>{const record=records.get(id);if(record&&!changed.has(id)){changed.set(id,record);for(const child of record.children??[])add(child);}};for(const id of released)add(id);if(changed.size)await applyRecords([...changed.values()],[],currentRoot);}
       else for(const [id,sent]of dirty)if(sent===message.eventId&&!editableIntents.has(id))dirty.delete(id);
       if(message.type==='error')for(const [id,intent]of editableIntents)if(intent.eventId===message.eventId){editableIntents.delete(id);dirty.delete(id);port.postMessage({type:'resync'});}
     }
@@ -228,11 +234,11 @@ function sameHover(hover:{nodeId:string;x:number;y:number}){return lastHover?.no
 function sendHover(){if(hoverWaiting||!pendingHover||!epoch)return;const hover=pendingHover;pendingHover=undefined;if(sameHover(hover))return;lastHover=hover;hoverWaiting=emit({action:'hover',...hover});hoverTimer=setTimeout(()=>{hoverWaiting=0;sendHover();},2500);}
 document.addEventListener('mousemove',event=>{if(pointerInput.held){lastHover=undefined;return;}const target=pointerNode(event.target);if(!target){lastHover=undefined;return;}const {nodeId,rect}=target;const hover={nodeId,x:(event.clientX-rect.left)/rect.width,y:(event.clientY-rect.top)/rect.height};if(sameHover(hover)){pendingHover=undefined;if(!hoverWaiting)clearTimeout(hoverTimer);return;}pendingHover=hover;if(!hoverWaiting){clearTimeout(hoverTimer);hoverTimer=setTimeout(sendHover,100);}});
 document.addEventListener('submit',event=>event.preventDefault());
-document.addEventListener('compositionstart',()=>{composing=true;});
+document.addEventListener('compositionstart',()=>{composing=true;clearTimeout(inputTimer);inputTimer=undefined;});
 document.addEventListener('compositionend',event=>{composing=false;const target=editableTarget(event.target)??event.target;if(target instanceof HTMLElement&&(target.isContentEditable||target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement)){pendingInput=target;input();}});
 document.addEventListener('input',event=>{
   const target=editableTarget(event.target)??event.target;if(!(target instanceof HTMLElement)||(!(target instanceof HTMLInputElement||target instanceof HTMLTextAreaElement)&&!target.isContentEditable)||(target instanceof HTMLInputElement&&!['text','password','email','search','url','tel','number'].includes(target.type)))return;
-  const id=reverse.get(target);if(!id)return;dirty.set(id,Number.MAX_SAFE_INTEGER);pendingInput=target;clearTimeout(inputTimer);if(!composing)inputTimer=setTimeout(input,45);
+  const id=reverse.get(target);if(!id)return;dirty.set(id,Number.MAX_SAFE_INTEGER);pendingInput=target;if(!composing&&!inputTimer)inputTimer=setTimeout(input,16);
 });
 document.addEventListener('focusout',event=>{if(editableTarget(event.target))setTimeout(()=>port.postMessage({type:'resync'}),0);});
 function selectControl(event:Event){const target=event.target;if(target instanceof HTMLSelectElement||target instanceof HTMLInputElement&&['range','color','date','time','datetime-local','month','week'].includes(target.type)){const id=reverse.get(target);if(id)dirty.set(id,emit({action:'select',nodeId:id,value:target.value}));}}

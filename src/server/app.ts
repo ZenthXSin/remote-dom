@@ -37,7 +37,7 @@ export async function createApp(config:Config,running?:RunningAppState) {
   let pending=0;const pendingOwners=new Map<string,number>();
   if(config.accountOwner){const expires=Date.now()+30*24*3600000;owners.set(config.accountOwner,expires);await store?.rememberOwner(config.accountOwner,expires);}
   let origin=running?.origin??'';
-  const [html,appJs,frameJs]=await Promise.all(['index.html','app.js','frame.js'].map(name=>readFile(join(config.assetDir,'public',name),'utf8')));
+  const [html,appJs,frameJs,streamWorkerJs]=await Promise.all(['index.html','app.js','frame.js','stream-worker.js'].map(name=>readFile(join(config.assetDir,'public',name),'utf8')));
   const ownerFor=(req:IncomingMessage)=>{const cookie=(req.headers.cookie??'').split(';').map(s=>s.trim()).find(s=>s.startsWith('rd_owner='))?.slice(9);return cookie&&(!config.accountOwner||cookie===config.accountOwner)&&(owners.get(cookie)??0)>Date.now()?cookie:undefined;};
   const server=running?.server??createServer();
   const requestHandler=(req:IncomingMessage,res:ServerResponse)=>{void(async()=>{
@@ -45,9 +45,10 @@ export async function createApp(config:Config,running?:RunningAppState) {
     res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
     if(path==='/health'&&req.method==='GET'){reply(res,200,{ok:true,mode:config.mode,productionReady:false});return;}
     if(path==='/'&&req.method==='GET'){
-      res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+      res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
       res.setHeader('Content-Type','text/html; charset=utf-8');res.end(html);return;
     }
+    if(path==='/stream-worker.js'&&req.method==='GET'){res.setHeader('Content-Type','text/javascript; charset=utf-8');res.setHeader('Content-Security-Policy',"default-src 'none'; connect-src 'self'");res.end(streamWorkerJs);return;}
     if(path==='/app.js'&&req.method==='GET'){res.setHeader('Content-Type','text/javascript; charset=utf-8');res.end(appJs);return;}
     if(path==='/mirror'&&req.method==='GET'){
       const nonce=randomBytes(18).toString('base64');

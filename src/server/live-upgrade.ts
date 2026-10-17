@@ -7,7 +7,7 @@ import {createApp,type RunningAppState} from './app.js';
 export {RemoteSession};
 
 export async function prepareUpgrade(assetDir:string){
-  const [captureSource,html,appJs,frameJs]=await Promise.all(['capture.js','public/index.html','public/app.js','public/frame.js'].map(path=>readFile(`${assetDir}/${path}`,'utf8')));
+  const [captureSource,html,appJs,frameJs,streamWorkerJs]=await Promise.all(['capture.js','public/index.html','public/app.js','public/frame.js','public/stream-worker.js'].map(path=>readFile(`${assetDir}/${path}`,'utf8')));
   return {install(app:any,owners?:Map<string,number>,running?:RunningAppState){
     const hydration:Promise<unknown>[]=[];let count=0;
     for(const session of app.sessions.values()){
@@ -42,9 +42,10 @@ export async function prepareUpgrade(assetDir:string){
         if(owner&&(owners.get(owner)??0)>Date.now()&&(owners.get(owner)??0)<Date.now()+2*3600000){owners.set(owner,Date.now()+24*3600000);res.setHeader('Set-Cookie',`rd_owner=${owner}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);}
         const setHeader=res.setHeader;res.setHeader=function(name:string,value:any){if(name.toLowerCase()==='set-cookie'){const extend=(cookie:string)=>{const token=cookie.match(/^rd_owner=([a-f0-9]{64});/)?.[1];if(token){owners.set(token,Date.now()+24*3600000);return cookie.replace(/Max-Age=\d+/,'Max-Age=86400');}return cookie;};value=Array.isArray(value)?value.map(extend):extend(String(value));}return setHeader.call(this,name,value);};
       }
-      if(req.method==='GET'&&['/','/app.js','/mirror'].includes(path)){
+      if(req.method==='GET'&&['/','/app.js','/mirror','/stream-worker.js'].includes(path)){
         res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
-        if(path==='/'){res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");res.setHeader('Content-Type','text/html; charset=utf-8');res.end(html);}
+        if(path==='/'){res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; worker-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");res.setHeader('Content-Type','text/html; charset=utf-8');res.end(html);}
+        else if(path==='/stream-worker.js'){res.setHeader('Content-Type','text/javascript; charset=utf-8');res.setHeader('Content-Security-Policy',"default-src 'none'; connect-src 'self'");res.end(streamWorkerJs);}
         else if(path==='/app.js'){res.setHeader('Content-Type','text/javascript; charset=utf-8');res.end(appJs);}
         else{const nonce=randomBytes(18).toString('base64');res.setHeader('Content-Security-Policy',`default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; img-src blob:; media-src blob:; connect-src 'none'; font-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts`);res.setHeader('Content-Type','text/html; charset=utf-8');res.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;min-height:100%;}body{overflow:auto}#mirror-root{min-height:100vh}</style></head><body><div id="mirror-root"></div><script nonce="${nonce}">${frameJs.replaceAll('</script','<\\/script')}</script></body></html>`);}
         return;

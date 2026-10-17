@@ -18,6 +18,7 @@ await Promise.all([
   build({entryPoints:['src/remote/capture.ts'],bundle:true,platform:'browser',format:'iife',outfile:'dist/capture.js'}),
   build({entryPoints:['src/client/app.ts'],bundle:true,platform:'browser',format:'iife',outfile:'dist/public/app.js'}),
   build({entryPoints:['src/client/frame.ts'],bundle:true,platform:'browser',format:'iife',outfile:'dist/public/frame.js'}),
+  build({entryPoints:['src/client/stream-worker.ts'],bundle:true,platform:'browser',format:'iife',outfile:'dist/public/stream-worker.js'}),
   page('src/client/index.html','dist/public/index.html')
 ]);
 console.log('Built server, isolated-world capture, trusted renderer and control UI.');

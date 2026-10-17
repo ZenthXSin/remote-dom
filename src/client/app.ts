@@ -5,12 +5,13 @@ import {RenderQueue} from './render-queue.js';
 import {AssetLoader} from './assets.js';
 import {collectNodeAssets} from '../shared/assets.js';
 import {DEVICE_PRESETS,type DevicePreset} from '../shared/device-presets.js';
+import {StreamSocket} from './stream-socket.js';
 import {ViewportSync} from './viewport-sync.js';
 const $=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
 const stage=$('mirror-stage');
 const frame=$<HTMLIFrameElement>('mirror');const address=$<HTMLInputElement>('address');
 let port:MessagePort;let readyResolve:()=>void;const ready=new Promise<void>(resolve=>readyResolve=resolve);
-let socket:WebSocket|undefined;let activeId='';let generation=0;let epoch='';let closing=false;let reconnectTimer:ReturnType<typeof setTimeout>|undefined;
+let socket:StreamSocket|undefined;let activeId='';let generation=0;let epoch='';let closing=false;let reconnectTimer:ReturnType<typeof setTimeout>|undefined;
 let eventCounter=Number(sessionStorage.getItem('rd_event_counter'))||0;const sentAt=new Map<number,{time:number;frameId?:number;action?:UserEvent['action']}>();let queue=Promise.resolve();
 const assetLoader=new AssetLoader((id,mime,bytes)=>port.postMessage({type:'asset',id,mime,bytes},[bytes]),(pending,failed)=>{
   $('resource-state').textContent=pending?`图片和字体加载中（${pending}）`:failed?`${failed} 项图片或字体未加载`:'';
@@ -290,11 +291,11 @@ function connect(id:string){
     requestPoll=()=>{clearTimeout(reconnectTimer);const kick=()=>{if(localGeneration!==generation||closing)return;if(polling)reconnectTimer=setTimeout(kick,15);else void poll();};kick();};
     void poll();return;
   }
-  const scheme=location.protocol==='https:'?'wss:':'ws:',candidate=new WebSocket(`${scheme}//${location.host}/api/sessions/${id}/stream`);socket=candidate;
+  const scheme=location.protocol==='https:'?'wss:':'ws:',candidate=new StreamSocket(`${scheme}//${location.host}/api/sessions/${id}/stream`);socket=candidate;
   let opened=false,received=false,lastMessage=Date.now(),stalled=false;
   socketTimeout=setTimeout(()=>{if(localGeneration===generation&&candidate.readyState===WebSocket.CONNECTING)candidate.close();},4000);
   candidate.onopen=()=>{if(localGeneration!==generation){candidate.close();return;}opened=true;lastMessage=Date.now();clearTimeout(socketTimeout);candidate.send(JSON.stringify({type:'render-flow',window:3}));online();heartbeat=setInterval(()=>{if(localGeneration!==generation)return;if(!document.hidden&&Date.now()-lastMessage>45000){stalled=true;candidate.close();return;}if(candidate.readyState===WebSocket.OPEN)candidate.send(JSON.stringify({type:'ping'}));},15000);};
-  candidate.onmessage=event=>{if(localGeneration!==generation)return;lastMessage=Date.now();try{const message=JSON.parse(event.data);received=true;if(message.type!=='pong')receive(message,id,localGeneration);}catch{candidate.close(1002,'Invalid stream response');}};
+  candidate.onmessage=event=>{if(localGeneration!==generation)return;lastMessage=Date.now();try{const message=typeof event.data==='string'?JSON.parse(event.data):event.data;received=true;if(message.type!=='pong')receive(message,id,localGeneration);}catch{candidate.close(1002,'Invalid stream response');}};
   candidate.onclose=()=>{if(localGeneration!==generation)return;clearTimeout(socketTimeout);offline();clearInterval(heartbeat);if(closing||!activeId)return;if(!opened||!received||stalled){httpFallback=true;transport='http';connect(id);}else reconnectTimer=setTimeout(()=>connect(id),1200);};
 }
 async function refresh(){const state=await api('/api/state');$('claude-login-open').hidden=!state.capabilities?.claudeSessionLogin;$('claude-login-floating').hidden=!state.capabilities?.claudeSessionLogin;assetLoader.setScope(state.assetCacheScope??'');containerProfile=state.deviceProfile;applyMirrorScale();containerEnvironment=state.containerEnvironment;$<HTMLButtonElement>('device-profile').disabled=!containerProfile;fixtureUrl=state.fixtureUrl;preferredUrl=state.defaultUrl??fixtureUrl;transport=httpFallback?'http':state.transport??'websocket';$('mode').textContent=state.mode==='demo'?'受控测试模式':'云端浏览 · 就绪';if(state.mode==='development'){$('demo').textContent='打开目标网页 →';if(!activeId&&!address.value)address.value=preferredUrl;}$('saved-panel').hidden=!state.capabilities?.persistentLogin;const saved=$<HTMLSelectElement>('saved-browsers');saved.replaceChildren();for(const browser of state.savedSessions??[]){const option=document.createElement('option');option.value=browser.id;option.textContent=browser.title;saved.append(option);} const select=$<HTMLSelectElement>('sessions');select.replaceChildren();for(const session of state.sessions){const option=document.createElement('option');option.value=session.id;option.textContent=session.title;select.append(option);}select.value=activeId;return state;}
