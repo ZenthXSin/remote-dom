@@ -17,6 +17,7 @@ export class FrameCapture {
   private ids=new Map<string,string>();private serial=0;
   private usedIds=new Set<string>();
   private activity=new Map<CaptureFrame,{context:number;revision:number}>();private capturedAt=0;
+  private shadowScans=new WeakMap<CaptureFrame,{context:number;at:number}>();
   private hiddenFrames=new Set<CaptureFrame>();
   routes=new Map<string,NodeRoute>();frameWindows=new Map<string,CaptureFrame>();
   main!:CaptureFrame;
@@ -122,16 +123,22 @@ export class FrameCapture {
           }
         }
         const previousContext=frame.context;await this.context(frame);if(previousContext!==frame.context)this.svgContexts.delete(frame);
-        const documentObject=await frame.cdp.send('Runtime.evaluate',{contextId:frame.context,expression:'document'});
-        if(documentObject.result.objectId){
-          const tree=await frame.cdp.send('DOM.describeNode',{objectId:documentObject.result.objectId,depth:32,pierce:true});await frame.cdp.send('Runtime.releaseObject',{objectId:documentObject.result.objectId});
-          const closed:number[]=[];const scan=(node:any)=>{for(const root of node.shadowRoots??[]){if(root.shadowRootType==='closed'&&closed.length<32)closed.push(root.backendNodeId);scan(root);}for(const child of node.children??[])scan(child);};scan(tree.node);
-          for(const backendNodeId of closed){const resolved=await frame.cdp.send('DOM.resolveNode',{backendNodeId,executionContextId:frame.context});if(resolved.object.objectId){await frame.cdp.send('Runtime.callFunctionOn',{objectId:resolved.object.objectId,functionDeclaration:'function(){window.__remoteDom.shadow(this.host,this)}'});await frame.cdp.send('Runtime.releaseObject',{objectId:resolved.object.objectId});}}
+        // Closed shadow roots need periodic discovery, not a serialized copy
+        // of the entire DOM tree for every keypress or streamed token. Existing
+        // roots are already watched by the isolated capture MutationObserver.
+        const scan=this.shadowScans.get(frame);
+        if(!scan||scan.context!==frame.context||Date.now()-scan.at>=750){
+          const documentObject=await frame.cdp.send('Runtime.evaluate',{contextId:frame.context,expression:'document'});
+          if(documentObject.result.objectId){
+            const tree=await frame.cdp.send('DOM.describeNode',{objectId:documentObject.result.objectId,depth:32,pierce:true});await frame.cdp.send('Runtime.releaseObject',{objectId:documentObject.result.objectId});
+            const closed:number[]=[];const scan=(node:any)=>{for(const root of node.shadowRoots??[]){if(root.shadowRootType==='closed'&&closed.length<32)closed.push(root.backendNodeId);scan(root);}for(const child of node.children??[])scan(child);};scan(tree.node);
+            for(const backendNodeId of closed){const resolved=await frame.cdp.send('DOM.resolveNode',{backendNodeId,executionContextId:frame.context});if(resolved.object.objectId){await frame.cdp.send('Runtime.callFunctionOn',{objectId:resolved.object.objectId,functionDeclaration:'function(){window.__remoteDom.shadow(this.host,this)}'});await frame.cdp.send('Runtime.releaseObject',{objectId:resolved.object.objectId});}}
+          }
+          this.shadowScans.set(frame,{context:frame.context!,at:Date.now()});
         }
         let registered=this.svgContexts.get(frame);if(!registered){registered=new Map();this.svgContexts.set(frame,registered);}
         for(const [url,source]of this.svgSources)if(registered.get(url)!==source){await this.evaluate(frame,`window.__remoteDom.svg(${JSON.stringify(url)},${JSON.stringify(source)})`);registered.set(url,source);}
-        const state=await this.evaluate(frame,'window.__remoteDom.activity()');
-        const raw=await this.evaluate(frame,'window.__remoteDom.capture()');if(raw?.root){documents.set(frame.id,raw);this.activity.set(frame,{context:frame.context!,revision:state.revision});}
+        const {state,document:raw}=await this.evaluate(frame,'({state:window.__remoteDom.activity(),document:window.__remoteDom.capture()})');if(raw?.root){documents.set(frame.id,raw);this.activity.set(frame,{context:frame.context!,revision:state.revision});}
       }
       catch(error){this.diagnostics.push({operation:'capture',error:error instanceof Error?error.message.slice(0,200):'unknown'});frame.context=undefined;if(frame===this.main)throw new Error('Main capture temporarily unavailable');}
     }

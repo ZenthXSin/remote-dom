@@ -30,7 +30,7 @@ export class RemoteSession {
   readonly diagnostics=new Diagnostics(()=>{for(const window of this.windows.values())void window.cdp.send('Network.disable').catch(()=>{});});
   readonly id=randomUUID(); readonly created=Date.now(); lastActivity=Date.now();
   browser!:Browser; context!:BrowserContext; page!:Page; cdp!:CDPSession;
-  private renderFlow=new WeakMap<WebSocket,{enabled:boolean;waiting?:{epoch:string;seq:number}}>();
+  private renderFlow=new WeakMap<WebSocket,{enabled:boolean;limit:number;waiting:{epoch:string;seq:number}[];last?:Snapshot}>();
   sockets=new Set<WebSocket>(); assets=new Map<string,AssetSource>();
   private assetByUrl=new Map<string,string>(); private assetRevision=0;private inlineTransit=new AssetTransit();private inlineIds:string[]=[];private assetLoads=new Map<string,Promise<AssetBody>>();
   private fontRules=new Map<string,RemoteFont[]>();
@@ -236,7 +236,7 @@ export class RemoteSession {
   }
   attach(socket:WebSocket) {
     this.diagnostics.add('stream-open');socket.once('close',(code)=>this.diagnostics.add('stream-close',{code}));
-    monitorSocket(socket);this.renderFlow.set(socket,{enabled:false});
+    monitorSocket(socket);this.renderFlow.set(socket,{enabled:false,limit:1,waiting:[]});
     this.view();
     this.lastActivity=Date.now();this.sockets.add(socket);const peer=randomUUID();this.events.set(peer,0);
     if(this.current)this.send(socket,this.current);
@@ -244,19 +244,17 @@ export class RemoteSession {
     socket.on('close',()=>{this.sockets.delete(socket);this.events.delete(peer);this.releaseInputs(peer);});
     socket.on('message',data=>{
       let message:unknown;try{message=JSON.parse(data.toString());}catch{return socket.close(1008,'Invalid JSON');}
-      if((message as {type?:string})?.type==='render-flow'){this.renderFlow.get(socket)!.enabled=true;return;}
+      if((message as {type?:string})?.type==='render-flow'){const flow=this.renderFlow.get(socket)!,limit=(message as {window?:number}).window;flow.enabled=true;flow.limit=Number.isInteger(limit)?Math.max(1,Math.min(3,limit!)):1;return;}
       if((message as {type?:string})?.type==='rendered'){
         const flow=this.renderFlow.get(socket)!,ack=message as {epoch?:string;seq?:number};
-        if(flow.enabled&&flow.waiting&&ack.epoch===flow.waiting.epoch&&ack.seq===flow.waiting.seq){
-          flow.waiting=undefined;
-          if(this.current&&(this.current.epoch!==ack.epoch||this.current.seq!==ack.seq)){
-            const previous=this.history.get(ack.seq!);
-            const patch=ack.epoch===this.current.epoch&&previous?.epoch===this.current.epoch?diff(previous,this.current):undefined;
-            this.send(socket,patch?{...patch,seq:this.current.seq}:this.current);
-          }
+        const index=flow.waiting.findIndex(frame=>ack.epoch===frame.epoch&&ack.seq===frame.seq);
+        if(flow.enabled&&index>=0){
+          // The renderer may coalesce contiguous frames and acknowledge the last.
+          flow.waiting.splice(0,index+1);
+          if(this.current&&(flow.last?.epoch!==this.current.epoch||flow.last?.seq!==this.current.seq))this.send(socket,this.current);
         }return;
       }
-      if((message as {type?:string})?.type==='resync'){this.renderFlow.get(socket)!.waiting=undefined;if(this.current)this.send(socket,this.current);return;}
+      if((message as {type?:string})?.type==='resync'){const flow=this.renderFlow.get(socket)!;flow.waiting=[];flow.last=undefined;if(this.current)this.send(socket,this.current);return;}
       if((message as {type?:string})?.type==='ping'){this.lastActivity=Date.now();this.send(socket,{type:'pong'});return;}
       void this.submit(message as UserEvent,peer).then(response=>this.send(socket,response));
     });
@@ -448,7 +446,23 @@ export class RemoteSession {
     else await this.page.reload({waitUntil:'domcontentloaded'});
   }
   send(socket:WebSocket,message:ServerMessage){if(socket.readyState===WebSocket.OPEN){
-    const flow=this.renderFlow.get(socket);if(flow&&(message.type==='snapshot'||message.type==='patch')){if(flow.enabled&&flow.waiting)return;flow.waiting={epoch:message.epoch,seq:message.seq};}
+    const flow=this.renderFlow.get(socket);
+    if(flow&&(message.type==='snapshot'||message.type==='patch')){
+      if(flow.enabled&&flow.waiting.length>=flow.limit)return;
+      const current=this.current;
+      if(flow.enabled&&current){
+        if(flow.last?.epoch===current.epoch&&flow.last.seq===current.seq)return;
+        // Keep one shared immutable baseline per viewer so a delayed client can
+        // catch up with a delta after the short general history has been evicted.
+        if(!(message.type==='patch'&&message.epoch===flow.last?.epoch&&message.base===flow.last.seq)){
+          const patch=flow.last?.epoch===current.epoch?diff(flow.last,current):undefined;
+          message=patch?{...patch,seq:current.seq}:current;
+        }
+      }
+      const cursor={epoch:message.epoch,seq:message.seq};
+      if(flow.enabled)flow.waiting.push(cursor);else flow.waiting=[cursor];
+      flow.last=current;
+    }
     if(socket.bufferedAmount>4*1024*1024){socket.close(1013,'Reconnect to resync');const timer=setTimeout(()=>socket.terminate(),1000);timer.unref();socket.once('close',()=>clearTimeout(timer));return;}socket.send(JSON.stringify(message));}}
   private broadcast(message:ServerMessage){for(const socket of this.sockets)this.send(socket,message);}
   summary(){return {id:this.id,title:this.current?.title??'加载中',url:this.current?.url??this.requestedUrl,created:this.created,seq:this.current?.seq??0,deviceProfileId:this.deviceProfile.id,devicePreset:this.devicePreset??'default',persistenceError:this.persistenceError||undefined};}
