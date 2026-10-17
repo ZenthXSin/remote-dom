@@ -114,7 +114,7 @@ export async function createApp(config:Config,running?:RunningAppState) {
         res.setHeader('Content-Type','application/octet-stream');res.setHeader('Content-Disposition',`attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(file.name)}`);res.setHeader('Content-Security-Policy',"default-src 'none'; sandbox");res.end(file.body);return;
       }
       if(match[2]==='updates'&&req.method==='GET'){
-        session.view();
+        session.view(true);
         const params=new URL(req.url!,origin).searchParams;
         const change=session.changes(params.get('epoch')??'',Number(params.get('since')??-1));
         if(!change||params.get('control')==='1'&&(change.type==='snapshot'||change.type==='patch')){res.writeHead(204);res.end();}else reply(res,200,change,/\bgzip\b/.test(req.headers['accept-encoding']??''));return;

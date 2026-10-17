@@ -60,7 +60,7 @@ export class RemoteSession {
   private deviceSwitchBusy=false;
   private persistenceError='';
   private pollTask?:Promise<void>;
-  private lastViewActivity=0;private capturedAssetState='';
+  private lastViewActivity=0;private lastHttpViewActivity=0;private capturedAssetState='';
   constructor(readonly owner:string,readonly config:Config,readonly policy:TargetPolicy,readonly deviceProfile:DeviceProfile,private store?:BrowserStore,private restoredState?:LoginState,restoredId?:string,private devicePreset:DevicePreset='default'){if(restoredId)(this as {id:string}).id=restoredId;if(!isDevicePreset(devicePreset))throw new Error('无效设备类型');}
   async start(url:string,viewport={width:1100,height:760}) {
     this.requestedUrl=url;
@@ -196,8 +196,8 @@ export class RemoteSession {
       return {preset,reloaded,persistence:!!this.store};
     }finally{this.deviceSwitchBusy=false;}
   }
-  view(){const wasIdle=Date.now()-this.lastViewActivity>=2000;this.lastViewActivity=Date.now();if(wasIdle&&this.timer){clearTimeout(this.timer);this.schedule();}}
-  private schedule(){if(!this.closed)this.timer=setTimeout(()=>{this.timer=undefined;void this.poll().finally(()=>this.schedule());},this.lastError?1500:this.sockets.size||Date.now()-this.lastViewActivity<2000?60:1500);}
+  view(http=false){const wasIdle=Date.now()-this.lastViewActivity>=2000;this.lastViewActivity=Date.now();if(http)this.lastHttpViewActivity=this.lastViewActivity;if(wasIdle&&this.timer){clearTimeout(this.timer);this.schedule(0);}}
+  private schedule(delay?:number){if(!this.closed)this.timer=setTimeout(()=>{this.timer=undefined;void this.poll().finally(()=>this.schedule());},delay??(this.lastError?1500:this.sockets.size||Date.now()-this.lastViewActivity<2000?60:1500));}
   poll(force=false):Promise<void> {
     if(this.pollTask)return this.pollTask;
     const task=this.captureDocument(force);this.pollTask=task;
@@ -212,6 +212,20 @@ export class RemoteSession {
   }
   private async captureDocument(force=false) {
     if(this.closed)return;
+    if(!force&&this.current){
+      // Do not start background DOM work ahead of pending input. Input feedback
+      // explicitly forces a capture after execution, independent of viewers.
+      if(this.queued)return;
+      const now=Date.now();
+      if(!this.sockets.size&&now-this.lastViewActivity>=2000)return;
+      // A stalled viewer cannot use additional snapshots. Keep the current
+      // baseline and resume at its next acknowledgement. HTTP readers have an
+      // independent demand signal and must not be held by a slow WS viewer.
+      if(this.sockets.size&&now-this.lastHttpViewActivity>=2000&&[...this.sockets].every(socket=>{
+        const flow=this.renderFlow.get(socket);
+        return socket.readyState!==WebSocket.OPEN||!!flow?.enabled&&flow.waiting.length>=flow.limit;
+      }))return;
+    }
     try {
       const assetState=`${this.assetRevision}:${this.fontRules.size}:${this.svgSources.size}:${this.persistenceError}`;
       if(!force&&this.current&&assetState===this.capturedAssetState&&!await this.capture.needsCapture())return;
@@ -254,7 +268,7 @@ export class RemoteSession {
         const index=flow.waiting.findIndex(frame=>ack.epoch===frame.epoch&&ack.seq===frame.seq);
         if(flow.enabled&&index>=0){
           // The renderer may coalesce contiguous frames and acknowledge the last.
-          flow.waiting.splice(0,index+1);
+          flow.waiting.splice(0,index+1);this.view();
           if(this.current&&(flow.last?.epoch!==this.current.epoch||flow.last?.seq!==this.current.seq))this.send(socket,this.current);
         }return;
       }
