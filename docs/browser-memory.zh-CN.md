@@ -1,0 +1,15 @@
+# 浏览器服务内存与页面卡死
+
+浏览器容器包含 Node.js 同步服务、Chromium 及其渲染进程。容器内存上限与 Node.js 的 JavaScript 堆上限是两个独立限制：即使容器尚有空闲内存，Node.js 也可能因自己的堆上限退出。`OOMKilled=false` 不能排除这种崩溃，应检查服务日志中的 `Reached heap limit`。
+
+引擎镜像将 Node.js 老生代上限设置为 512 MiB，年轻代半空间上限为 8 MiB，替代原来的 128/2 MiB。此设置只作用于浏览器引擎，不改变控制服务、出口代理或容器的总内存配额。512 MiB 是可用上限，不是启动时预分配量，也不是整个浏览器的内存占用承诺。
+
+升级已有容器时必须替换容器中的旧 `NODE_OPTIONS`；仅更新镜像标签但继续复制旧环境变量不会生效。验证时使用：
+
+```sh
+node -e 'console.log(require("node:v8").getHeapStatistics().heap_size_limit / 1024 / 1024)'
+```
+
+不同 V8 版本的实际堆上限会包含年轻代开销，可能略大于 512 MiB。不要为追求 200 MiB 的整容器目标强行压低堆上限：复杂 DOM 捕获、Playwright 协议处理和并存页面快照都需要额外工作空间。
+
+`tests/e2e/capture-memory.test.ts` 用真实 Chromium 连续替换 1200 个元素并捕获 300 次，检查旧节点身份释放、最新页面同步、草稿保留及 GC 后内存是否趋于稳定。使用 `node --expose-gc --import tsx --test tests/e2e/capture-memory.test.ts` 运行。该本地负载不能覆盖所有外部网站、长期会话和资源响应；如果仍有增长，需要根据对应负载进一步分析，不能仅凭上调上限判断不存在内存泄漏。

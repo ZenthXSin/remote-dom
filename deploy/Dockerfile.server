@@ -27,7 +27,8 @@ USER node
 CMD ["node", "dist/gateway/main.js"]
 
 FROM runtime AS engine
-ENV NODE_OPTIONS="--max-old-space-size=128 --max-semi-space-size=2"
+# DOM capture and Playwright share this heap. This is a ceiling, not reserved RAM.
+ENV NODE_OPTIONS="--max-old-space-size=512 --max-semi-space-size=8"
 USER root
 RUN --mount=type=secret,id=proxy_ca \
     : > /tmp/build-ca.pem \
