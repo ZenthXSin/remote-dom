@@ -4,6 +4,7 @@ import type {Page,Frame,CDPSession} from 'playwright-core';
 import type {CapturedDocument,MirrorNode} from '../shared/protocol.js';
 
 interface FrameDescription {id:string;parentId?:string}
+const QUIET_PAGE_FALLBACK_MS=1500;
 interface FrameTree {frame:FrameDescription;childFrames?:FrameTree[]}
 export interface CaptureFrame {id:string;parentId?:string;cdp:CDPSession;context?:number;owner?:{frame:CaptureFrame;nodeId:string}}
 export interface NodeRoute {frame:CaptureFrame;localId:string}
@@ -99,7 +100,7 @@ export class FrameCapture {
     const elapsed=Date.now()-this.capturedAt;
     // CSSOM edits and roots attached to existing hosts do not necessarily emit
     // observable DOM events. Keep a bounded full-discovery fallback.
-    if(elapsed>=750||!this.main||this.page.frames().length!==this.frames.size)return true;
+    if(elapsed>=QUIET_PAGE_FALLBACK_MS||!this.main||this.page.frames().length!==this.frames.size)return true;
     for(const frame of this.frames.values()){
       if(this.hiddenFrames.has(frame))continue;
       const previous=this.activity.get(frame);if(!frame.context||previous?.context!==frame.context)return true;
@@ -128,7 +129,7 @@ export class FrameCapture {
         // of the entire DOM tree for every keypress or streamed token. Existing
         // roots are already watched by the isolated capture MutationObserver.
         const scan=this.shadowScans.get(frame);
-        if(!scan||scan.context!==frame.context||Date.now()-scan.at>=750){
+        if(!scan||scan.context!==frame.context||Date.now()-scan.at>=QUIET_PAGE_FALLBACK_MS){
           const documentObject=await frame.cdp.send('Runtime.evaluate',{contextId:frame.context,expression:'document'});
           if(documentObject.result.objectId){
             const tree=await frame.cdp.send('DOM.describeNode',{objectId:documentObject.result.objectId,depth:32,pierce:true});await frame.cdp.send('Runtime.releaseObject',{objectId:documentObject.result.objectId});
